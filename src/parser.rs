@@ -49,8 +49,17 @@ impl<'src> Parser<'src> {
         if self.match_keyword(Keyword::Function) {
             return self.parse_function_stmt(false);
         }
+        if self.match_keyword(Keyword::Enum) {
+            return self.parse_enum_stmt();
+        }
         if self.match_keyword(Keyword::If) {
             return self.parse_if_stmt();
+        }
+        if self.match_keyword(Keyword::Switch) {
+            return self.parse_switch_stmt();
+        }
+        if self.match_keyword(Keyword::Match) {
+            return self.parse_match_stmt();
         }
         if self.match_keyword(Keyword::While) {
             return self.parse_while_stmt();
@@ -79,6 +88,9 @@ impl<'src> Parser<'src> {
         }
         if self.match_keyword(Keyword::Continue) {
             return Ok(Stmt::Continue);
+        }
+        if self.match_keyword(Keyword::Fallthrough) {
+            return Ok(Stmt::Fallthrough);
         }
         if self.check_keyword(Keyword::Type)
             || (self.check_keyword(Keyword::Export) && self.check_keyword_at(1, Keyword::Type))
@@ -124,6 +136,41 @@ impl<'src> Parser<'src> {
         Ok(Stmt::TypeAlias {
             raw: self.source[start..end].trim().to_string(),
         })
+    }
+
+    fn parse_enum_stmt(&mut self) -> Result<Stmt> {
+        let name = self.expect_identifier()?;
+        let base_type = if self.match_symbol(Symbol::Colon) {
+            Some(self.collect_type_annotation(&[StopToken::Keyword(Keyword::End)])?)
+        } else {
+            None
+        };
+
+        let mut members = Vec::new();
+        while !self.check_keyword(Keyword::End) && !self.is_eof() {
+            if self.match_symbol(Symbol::Comma) || self.match_symbol(Symbol::Semi) {
+                continue;
+            }
+            let member_name = self.expect_identifier()?;
+            let value = if self.match_symbol(Symbol::Assign) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            members.push(EnumMember {
+                name: member_name,
+                value,
+            });
+            self.match_symbol(Symbol::Comma);
+            self.match_symbol(Symbol::Semi);
+        }
+        self.expect_keyword(Keyword::End)?;
+
+        Ok(Stmt::Enum(EnumDecl {
+            name,
+            base_type,
+            members,
+        }))
     }
 
     fn parse_local_decl(&mut self, is_const: bool) -> Result<Stmt> {
@@ -285,6 +332,125 @@ impl<'src> Parser<'src> {
             branches,
             else_block,
         }))
+    }
+
+    fn parse_switch_stmt(&mut self) -> Result<Stmt> {
+        let value = self.parse_expr()?;
+        let mut cases = Vec::new();
+        let mut default = None;
+
+        while !self.check_keyword(Keyword::End) && !self.is_eof() {
+            if self.match_keyword(Keyword::Case) {
+                let case_value = self.parse_expr()?;
+                let mut block =
+                    self.parse_block(&[Keyword::Case, Keyword::Default, Keyword::End])?;
+                let fallthrough = matches!(block.last(), Some(Stmt::Fallthrough));
+                if fallthrough {
+                    block.pop();
+                }
+                cases.push(SwitchCase {
+                    value: case_value,
+                    block,
+                    fallthrough,
+                });
+                continue;
+            }
+
+            if self.match_keyword(Keyword::Default) {
+                default = Some(self.parse_block(&[Keyword::End])?);
+                break;
+            }
+
+            return Err(self.error_here("expected `case`, `default`, or `end` in switch"));
+        }
+
+        self.expect_keyword(Keyword::End)?;
+        Ok(Stmt::Switch(SwitchStmt {
+            value,
+            cases,
+            default,
+        }))
+    }
+
+    fn parse_match_stmt(&mut self) -> Result<Stmt> {
+        let value = self.parse_match_subject_expr()?;
+        let mut cases = Vec::new();
+
+        while !self.check_keyword(Keyword::End) && !self.is_eof() {
+            let pattern_column = self.current().span.column;
+            let pattern = self.parse_match_pattern()?;
+            let guard = if self.match_keyword(Keyword::If) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            let block = self.parse_match_case_block(pattern_column)?;
+            cases.push(MatchCase {
+                pattern,
+                guard,
+                block,
+            });
+        }
+
+        self.expect_keyword(Keyword::End)?;
+        Ok(Stmt::Match(MatchStmt { value, cases }))
+    }
+
+    fn parse_match_subject_expr(&mut self) -> Result<Expr> {
+        let start_line = self.current().span.line;
+        let mut expr = if self.match_symbol(Symbol::LParen) {
+            let inner = self.parse_expr()?;
+            self.expect_symbol(Symbol::RParen)?;
+            Expr::Paren(Box::new(inner))
+        } else if self.check(TokenKind::Identifier) {
+            Expr::Name(self.bump().lexeme)
+        } else {
+            return self.parse_expr();
+        };
+
+        loop {
+            if self.current().span.line > start_line && self.is_match_pattern_start() {
+                break;
+            }
+            if self.match_symbol(Symbol::Dot) {
+                let name = self.expect_identifier()?;
+                expr = self.push_segment(expr, ChainSegment::Field { name, safe: false });
+                continue;
+            }
+            if self.match_symbol(Symbol::LBracket) {
+                let index = self.parse_expr()?;
+                self.expect_symbol(Symbol::RBracket)?;
+                expr = self.push_segment(
+                    expr,
+                    ChainSegment::Index {
+                        expr: Box::new(index),
+                        safe: false,
+                    },
+                );
+                continue;
+            }
+            if self.match_symbol(Symbol::Colon) {
+                let name = self.expect_identifier()?;
+                let args = self.parse_args()?;
+                expr = self.push_segment(
+                    expr,
+                    ChainSegment::MethodCall {
+                        name,
+                        args,
+                        safe: false,
+                    },
+                );
+                continue;
+            }
+            if self.current().span.line == start_line && self.check_call_start() {
+                let args = self.parse_args()?;
+                expr = self.push_segment(expr, ChainSegment::Call { args });
+                continue;
+            }
+            break;
+        }
+
+        Ok(expr)
     }
 
     fn parse_while_stmt(&mut self) -> Result<Stmt> {
@@ -578,6 +744,12 @@ impl<'src> Parser<'src> {
         if self.match_keyword(Keyword::If) {
             return self.parse_if_expr();
         }
+        if self.match_keyword(Keyword::Switch) {
+            return self.parse_switch_expr();
+        }
+        if self.match_keyword(Keyword::Do) {
+            return self.parse_do_expr();
+        }
         if self.match_keyword(Keyword::Function) {
             return self.parse_function_expr();
         }
@@ -645,6 +817,65 @@ impl<'src> Parser<'src> {
         })
     }
 
+    fn parse_switch_expr(&mut self) -> Result<Expr> {
+        let value = self.parse_expr()?;
+        let mut cases = Vec::new();
+        while self.match_keyword(Keyword::Case) {
+            let case_value = self.parse_expr()?;
+            self.expect_keyword(Keyword::Then)?;
+            let result = self.parse_expr()?;
+            cases.push(SwitchExprCase {
+                value: case_value,
+                result,
+            });
+        }
+        self.expect_keyword(Keyword::Default)?;
+        self.expect_keyword(Keyword::Then)?;
+        let default = self.parse_expr()?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Expr::SwitchExpr {
+            value: Box::new(value),
+            cases,
+            default: Box::new(default),
+        })
+    }
+
+    fn parse_do_expr(&mut self) -> Result<Expr> {
+        let mut block = Vec::new();
+        let result = loop {
+            if self.check_keyword(Keyword::End) {
+                return Err(self.error_here("do-expression requires a final value expression"));
+            }
+
+            if self.match_symbol(Symbol::Semi) {
+                continue;
+            }
+
+            if self.looks_like_statement_start() {
+                block.push(self.parse_stmt()?);
+                continue;
+            }
+
+            let expr = self.parse_expr()?;
+            if self.check_keyword(Keyword::End) {
+                break expr;
+            }
+            if self.is_call_statement_expr(&expr) {
+                block.push(Stmt::Call(expr));
+                continue;
+            }
+            return Err(self.error_here(
+                "only call expressions may appear before the final do-expression value",
+            ));
+        };
+
+        self.expect_keyword(Keyword::End)?;
+        Ok(Expr::DoExpr {
+            block,
+            result: Box::new(result),
+        })
+    }
+
     fn parse_function_expr(&mut self) -> Result<Expr> {
         let generics = if self.check_symbol(Symbol::Less) {
             Some(self.collect_balanced(Symbol::Less, Symbol::Greater)?)
@@ -661,33 +892,143 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_table_expr(&mut self) -> Result<Expr> {
-        let mut fields = Vec::new();
-        if !self.check_symbol(Symbol::RBrace) {
-            loop {
-                if self.match_symbol(Symbol::LBracket) {
-                    let key = self.parse_expr()?;
-                    self.expect_symbol(Symbol::RBracket)?;
-                    self.expect_symbol(Symbol::Assign)?;
-                    let value = self.parse_expr()?;
-                    fields.push(TableField::Indexed(key, value));
-                } else if self.check(TokenKind::Identifier)
-                    && self.check_symbol_at(1, Symbol::Assign)
-                {
-                    let name = self.bump().lexeme;
-                    self.expect_symbol(Symbol::Assign)?;
-                    let value = self.parse_expr()?;
-                    fields.push(TableField::Named(name, value));
-                } else {
-                    fields.push(TableField::Value(self.parse_expr()?));
-                }
-
-                if !self.match_symbol(Symbol::Comma) && !self.match_symbol(Symbol::Semi) {
-                    break;
-                }
-            }
+        if self.check_symbol(Symbol::RBrace) {
+            self.expect_symbol(Symbol::RBrace)?;
+            return Ok(Expr::Table(Vec::new()));
         }
+
+        if self.match_symbol(Symbol::LBracket) {
+            let key = self.parse_expr()?;
+            self.expect_symbol(Symbol::RBracket)?;
+            self.expect_symbol(Symbol::Assign)?;
+            let value = self.parse_expr()?;
+            if self.match_keyword(Keyword::For) {
+                let clauses = self.parse_comprehension_clauses()?;
+                self.expect_symbol(Symbol::RBrace)?;
+                return Ok(Expr::Comprehension(Box::new(TableComprehension {
+                    kind: TableComprehensionKind::Map {
+                        key: Box::new(key),
+                        value: Box::new(value),
+                    },
+                    clauses,
+                })));
+            }
+
+            let mut fields = vec![TableField::Indexed(key, value)];
+            self.parse_table_fields_tail(&mut fields)?;
+            self.expect_symbol(Symbol::RBrace)?;
+            return Ok(Expr::Table(fields));
+        }
+
+        if self.check(TokenKind::Identifier) && self.check_symbol_at(1, Symbol::Assign) {
+            let name = self.bump().lexeme;
+            self.expect_symbol(Symbol::Assign)?;
+            let value = self.parse_expr()?;
+            let mut fields = vec![TableField::Named(name, value)];
+            self.parse_table_fields_tail(&mut fields)?;
+            self.expect_symbol(Symbol::RBrace)?;
+            return Ok(Expr::Table(fields));
+        }
+
+        let first = self.parse_expr()?;
+        if self.match_keyword(Keyword::For) {
+            let clauses = self.parse_comprehension_clauses()?;
+            self.expect_symbol(Symbol::RBrace)?;
+            return Ok(Expr::Comprehension(Box::new(TableComprehension {
+                kind: TableComprehensionKind::Array {
+                    value: Box::new(first),
+                },
+                clauses,
+            })));
+        }
+
+        let mut fields = vec![TableField::Value(first)];
+        self.parse_table_fields_tail(&mut fields)?;
         self.expect_symbol(Symbol::RBrace)?;
         Ok(Expr::Table(fields))
+    }
+
+    fn parse_table_fields_tail(&mut self, fields: &mut Vec<TableField>) -> Result<()> {
+        while self.match_symbol(Symbol::Comma) || self.match_symbol(Symbol::Semi) {
+            if self.check_symbol(Symbol::RBrace) {
+                break;
+            }
+
+            if self.match_symbol(Symbol::LBracket) {
+                let key = self.parse_expr()?;
+                self.expect_symbol(Symbol::RBracket)?;
+                self.expect_symbol(Symbol::Assign)?;
+                let value = self.parse_expr()?;
+                fields.push(TableField::Indexed(key, value));
+            } else if self.check(TokenKind::Identifier) && self.check_symbol_at(1, Symbol::Assign) {
+                let name = self.bump().lexeme;
+                self.expect_symbol(Symbol::Assign)?;
+                let value = self.parse_expr()?;
+                fields.push(TableField::Named(name, value));
+            } else {
+                fields.push(TableField::Value(self.parse_expr()?));
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_comprehension_clauses(&mut self) -> Result<Vec<ComprehensionClause>> {
+        let mut clauses = Vec::new();
+        clauses.push(self.parse_comprehension_for_clause()?);
+        while self.match_keyword(Keyword::For) {
+            clauses.push(self.parse_comprehension_for_clause()?);
+        }
+        if self.match_keyword(Keyword::If) {
+            clauses.push(ComprehensionClause::Filter(self.parse_expr()?));
+        }
+        Ok(clauses)
+    }
+
+    fn parse_comprehension_for_clause(&mut self) -> Result<ComprehensionClause> {
+        if self.check(TokenKind::Identifier) && self.check_symbol_at(1, Symbol::Assign) {
+            let name = self.expect_identifier()?;
+            self.expect_symbol(Symbol::Assign)?;
+            let start = self.parse_expr()?;
+            self.expect_symbol(Symbol::Comma)?;
+            let end = self.parse_expr()?;
+            let step = if self.match_symbol(Symbol::Comma) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            return Ok(ComprehensionClause::NumericFor {
+                name,
+                start,
+                end,
+                step,
+            });
+        }
+
+        let mut bindings = Vec::new();
+        loop {
+            let pattern = self.parse_pattern()?;
+            let type_annotation = if self.match_symbol(Symbol::Colon) {
+                Some(self.collect_type_annotation(&[
+                    StopToken::Symbol(Symbol::Comma),
+                    StopToken::Keyword(Keyword::In),
+                ])?)
+            } else {
+                None
+            };
+            bindings.push(Binding {
+                pattern,
+                type_annotation,
+            });
+            if !self.match_symbol(Symbol::Comma) {
+                break;
+            }
+        }
+        self.expect_keyword(Keyword::In)?;
+        let iterables = self.parse_expr_list()?;
+        Ok(ComprehensionClause::GenericFor {
+            bindings,
+            iterables,
+        })
     }
 
     fn parse_prefix_chain(&mut self) -> Result<Expr> {
@@ -701,6 +1042,65 @@ impl<'src> Parser<'src> {
             return Err(self.error_here("expected assignable expression or call"));
         };
         self.parse_postfix(base)
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<MatchPattern> {
+        if self.match_symbol(Symbol::LBrace) {
+            let mut fields = Vec::new();
+            if !self.check_symbol(Symbol::RBrace) {
+                loop {
+                    let key = self.expect_identifier()?;
+                    self.expect_symbol(Symbol::Assign)?;
+                    let pattern = self.parse_match_pattern()?;
+                    fields.push(MatchFieldPattern { key, pattern });
+                    if !self.match_symbol(Symbol::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect_symbol(Symbol::RBrace)?;
+            return Ok(MatchPattern::Table(fields));
+        }
+
+        if self.match_keyword(Keyword::Nil) {
+            return Ok(MatchPattern::Literal(Expr::Nil));
+        }
+        if self.match_keyword(Keyword::True) {
+            return Ok(MatchPattern::Literal(Expr::Bool(true)));
+        }
+        if self.match_keyword(Keyword::False) {
+            return Ok(MatchPattern::Literal(Expr::Bool(false)));
+        }
+        if self.check(TokenKind::String) {
+            return Ok(MatchPattern::Literal(Expr::String(self.bump().lexeme)));
+        }
+        if self.check(TokenKind::Number) {
+            return Ok(MatchPattern::Literal(Expr::Number(self.bump().lexeme)));
+        }
+        if self.check(TokenKind::Identifier) {
+            let name = self.bump().lexeme;
+            if self.check_symbol(Symbol::Dot) {
+                let expr = self.parse_postfix(Expr::Name(name))?;
+                return Ok(MatchPattern::Literal(expr));
+            }
+            return Ok(MatchPattern::Bind(name));
+        }
+
+        Err(self.error_here("expected match pattern"))
+    }
+
+    fn parse_match_case_block(&mut self, pattern_column: usize) -> Result<Block> {
+        let mut statements = Vec::new();
+        while !self.is_eof() && !self.check_keyword(Keyword::End) {
+            if self.current().span.column <= pattern_column && self.is_match_pattern_start() {
+                break;
+            }
+            if self.match_symbol(Symbol::Semi) {
+                continue;
+            }
+            statements.push(self.parse_stmt()?);
+        }
+        Ok(statements)
     }
 
     fn parse_postfix(&mut self, base: Expr) -> Result<Expr> {
@@ -736,7 +1136,7 @@ impl<'src> Parser<'src> {
                 );
                 continue;
             }
-            if self.check_call_start() {
+            if self.check_call_start_same_line() {
                 let args = self.parse_args()?;
                 expr = self.push_segment(expr, ChainSegment::Call { args });
                 continue;
@@ -763,7 +1163,7 @@ impl<'src> Parser<'src> {
                 self.bump();
                 self.bump();
                 let name = self.expect_identifier()?;
-                if self.check_call_start() {
+                if self.check_call_start_same_line() {
                     let args = self.parse_args()?;
                     expr = self.push_segment(
                         expr,
@@ -791,7 +1191,7 @@ impl<'src> Parser<'src> {
         }
 
         let callee = self.parse_pipe_callee()?;
-        if self.check_call_start() {
+        if self.check_call_start_same_line() {
             let args = self.parse_args()?;
             Ok(PipeStage::Call {
                 callee: Box::new(callee),
@@ -1039,16 +1439,22 @@ impl<'src> Parser<'src> {
             TokenKind::Keyword(Keyword::Local)
                 | TokenKind::Keyword(Keyword::Const)
                 | TokenKind::Keyword(Keyword::Function)
+                | TokenKind::Keyword(Keyword::Enum)
                 | TokenKind::Keyword(Keyword::If)
+                | TokenKind::Keyword(Keyword::Switch)
+                | TokenKind::Keyword(Keyword::Match)
                 | TokenKind::Keyword(Keyword::For)
                 | TokenKind::Keyword(Keyword::While)
                 | TokenKind::Keyword(Keyword::Repeat)
                 | TokenKind::Keyword(Keyword::Return)
                 | TokenKind::Keyword(Keyword::Break)
                 | TokenKind::Keyword(Keyword::Continue)
+                | TokenKind::Keyword(Keyword::Fallthrough)
                 | TokenKind::Keyword(Keyword::Do)
                 | TokenKind::Keyword(Keyword::Type)
                 | TokenKind::Keyword(Keyword::Export)
+                | TokenKind::Keyword(Keyword::Case)
+                | TokenKind::Keyword(Keyword::Default)
                 | TokenKind::Keyword(Keyword::End)
                 | TokenKind::Keyword(Keyword::Else)
                 | TokenKind::Keyword(Keyword::ElseIf)
@@ -1060,6 +1466,10 @@ impl<'src> Parser<'src> {
         self.check_symbol(Symbol::LParen)
             || self.check(TokenKind::String)
             || self.check_symbol(Symbol::LBrace)
+    }
+
+    fn check_call_start_same_line(&self) -> bool {
+        self.check_call_start() && self.current().span.line == self.previous().span.line
     }
 
     fn check_block_end(&self) -> bool {
@@ -1166,6 +1576,28 @@ impl<'src> Parser<'src> {
         matches!(self.current().kind, TokenKind::Eof)
     }
 
+    fn is_call_statement_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Chain { segments, .. } => segments.iter().any(|segment| {
+                matches!(
+                    segment,
+                    ChainSegment::Call { .. } | ChainSegment::MethodCall { .. }
+                )
+            }),
+            _ => false,
+        }
+    }
+
+    fn is_match_pattern_start(&self) -> bool {
+        self.check_symbol(Symbol::LBrace)
+            || self.check(TokenKind::String)
+            || self.check(TokenKind::Number)
+            || self.check_keyword(Keyword::Nil)
+            || self.check_keyword(Keyword::True)
+            || self.check_keyword(Keyword::False)
+            || self.check(TokenKind::Identifier)
+    }
+
     fn error_here(&self, message: &str) -> CompilerError {
         let Span { line, column, .. } = self.current().span;
         CompilerError::Parse {
@@ -1217,6 +1649,7 @@ fn symbol_text(symbol: Symbol) -> &'static str {
         Symbol::DoubleSlash => "//",
         Symbol::Percent => "%",
         Symbol::Caret => "^",
+        Symbol::Pipe => "|",
         Symbol::Hash => "#",
         Symbol::DoubleDot => "..",
         Symbol::Ellipsis => "...",

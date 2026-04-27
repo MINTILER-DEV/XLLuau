@@ -9,6 +9,7 @@ pub type Block = Vec<Stmt>;
 pub enum Stmt {
     Local(LocalDecl),
     Function(FunctionDecl),
+    Enum(EnumDecl),
     Assignment(Assignment),
     CompoundAssignment {
         target: AssignTarget,
@@ -22,6 +23,8 @@ pub enum Stmt {
     Call(Expr),
     Return(Vec<Expr>),
     If(IfStmt),
+    Switch(SwitchStmt),
+    Match(MatchStmt),
     While {
         condition: Expr,
         block: Block,
@@ -35,9 +38,23 @@ pub enum Stmt {
     Do(Block),
     Break,
     Continue,
+    Fallthrough,
     TypeAlias {
         raw: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDecl {
+    pub name: String,
+    pub base_type: Option<String>,
+    pub members: Vec<EnumMember>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumMember {
+    pub name: String,
+    pub value: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +143,46 @@ pub struct IfStmt {
 }
 
 #[derive(Debug, Clone)]
+pub struct SwitchStmt {
+    pub value: Expr,
+    pub cases: Vec<SwitchCase>,
+    pub default: Option<Block>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchCase {
+    pub value: Expr,
+    pub block: Block,
+    pub fallthrough: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchStmt {
+    pub value: Expr,
+    pub cases: Vec<MatchCase>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchCase {
+    pub pattern: MatchPattern,
+    pub guard: Option<Expr>,
+    pub block: Block,
+}
+
+#[derive(Debug, Clone)]
+pub enum MatchPattern {
+    Literal(Expr),
+    Bind(String),
+    Table(Vec<MatchFieldPattern>),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchFieldPattern {
+    pub key: String,
+    pub pattern: MatchPattern,
+}
+
+#[derive(Debug, Clone)]
 pub struct ForNumeric {
     pub name: String,
     pub start: Expr,
@@ -155,6 +212,15 @@ pub enum Expr {
         branches: Vec<(Expr, Expr)>,
         else_expr: Box<Expr>,
     },
+    DoExpr {
+        block: Block,
+        result: Box<Expr>,
+    },
+    SwitchExpr {
+        value: Box<Expr>,
+        cases: Vec<SwitchExprCase>,
+        default: Box<Expr>,
+    },
     Paren(Box<Expr>),
     Unary {
         op: UnaryOp,
@@ -182,6 +248,13 @@ pub enum Expr {
         left: Box<Expr>,
         stages: Vec<PipeStage>,
     },
+    Comprehension(Box<TableComprehension>),
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchExprCase {
+    pub value: Expr,
+    pub result: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +262,33 @@ pub enum TableField {
     Named(String, Expr),
     Indexed(Expr, Expr),
     Value(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub struct TableComprehension {
+    pub kind: TableComprehensionKind,
+    pub clauses: Vec<ComprehensionClause>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TableComprehensionKind {
+    Array { value: Box<Expr> },
+    Map { key: Box<Expr>, value: Box<Expr> },
+}
+
+#[derive(Debug, Clone)]
+pub enum ComprehensionClause {
+    GenericFor {
+        bindings: Vec<Binding>,
+        iterables: Vec<Expr>,
+    },
+    NumericFor {
+        name: String,
+        start: Expr,
+        end: Expr,
+        step: Option<Expr>,
+    },
+    Filter(Expr),
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     ast::*,
@@ -8,6 +8,8 @@ use crate::{
 pub struct Emitter {
     temp_counter: usize,
     const_scopes: Vec<HashSet<String>>,
+    type_scopes: Vec<HashMap<String, String>>,
+    type_defs: HashMap<String, TypeShape>,
     errors: Vec<String>,
 }
 
@@ -24,11 +26,32 @@ struct LoweredTarget {
     expr: String,
 }
 
+#[derive(Debug, Clone)]
+struct GroupedSwitchCase {
+    values: Vec<Expr>,
+    block: Block,
+}
+
+#[derive(Debug, Clone)]
+enum TypeShape {
+    LiteralUnion(Vec<String>),
+    Enum {
+        values: Vec<String>,
+        members: HashMap<String, String>,
+    },
+    DiscriminatedUnion {
+        field: String,
+        variants: Vec<String>,
+    },
+}
+
 impl Emitter {
     pub fn new() -> Self {
         Self {
             temp_counter: 0,
             const_scopes: vec![HashSet::new()],
+            type_scopes: vec![HashMap::new()],
+            type_defs: HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -46,6 +69,7 @@ impl Emitter {
 
     fn emit_block(&mut self, block: &Block, indent: usize) -> Result<String> {
         self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
         let mut lines = Vec::new();
         for stmt in block {
             let chunk = self.emit_stmt(stmt, indent)?;
@@ -54,6 +78,7 @@ impl Emitter {
             }
         }
         self.const_scopes.pop();
+        self.type_scopes.pop();
         Ok(lines.join("\n"))
     }
 
@@ -61,6 +86,10 @@ impl Emitter {
         match stmt {
             Stmt::Local(local) => self.emit_local(local, indent),
             Stmt::Function(function) => self.emit_function_stmt(function, indent),
+            Stmt::Enum(decl) => {
+                self.register_enum_type(decl);
+                self.emit_enum_decl(decl, indent)
+            }
             Stmt::Assignment(assignment) => self.emit_assignment(assignment, indent),
             Stmt::CompoundAssignment { target, op, value } => {
                 self.emit_compound_assignment(target, *op, value, indent)
@@ -77,6 +106,8 @@ impl Emitter {
             }
             Stmt::Return(values) => self.emit_return(values, indent),
             Stmt::If(if_stmt) => self.emit_if_stmt(if_stmt, indent),
+            Stmt::Switch(switch_stmt) => self.emit_switch_stmt(switch_stmt, indent),
+            Stmt::Match(match_stmt) => self.emit_match_stmt(match_stmt, indent),
             Stmt::While { condition, block } => self.emit_while_stmt(condition, block, indent),
             Stmt::Repeat { block, condition } => self.emit_repeat_stmt(block, condition, indent),
             Stmt::ForNumeric(for_numeric) => self.emit_for_numeric(for_numeric, indent),
@@ -92,7 +123,17 @@ impl Emitter {
             }
             Stmt::Break => Ok(self.indent(indent, "break")),
             Stmt::Continue => Ok(self.indent(indent, "continue")),
-            Stmt::TypeAlias { raw } => Ok(self.indent(indent, raw)),
+            Stmt::Fallthrough => {
+                self.errors.push(
+                    "`fallthrough` is only valid as the last statement in a switch case"
+                        .to_string(),
+                );
+                Ok(String::new())
+            }
+            Stmt::TypeAlias { raw } => {
+                self.register_type_alias(raw);
+                Ok(self.indent(indent, raw))
+            }
         }
     }
 
@@ -141,6 +182,7 @@ impl Emitter {
 
         for binding in &local.bindings {
             self.declare_local_names(&binding.pattern, local.is_const);
+            self.declare_pattern_types(&binding.pattern, &binding.type_annotation);
         }
 
         Ok(parts.join("\n"))
@@ -276,9 +318,11 @@ impl Emitter {
         }
 
         self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
         for name in self.collect_param_names(&function.params) {
             self.declare_name(&name, false);
         }
+        self.declare_param_types(&function.params);
         let mut body_lines = Vec::new();
         for line in prologue {
             body_lines.push(self.indent(indent + 1, &line));
@@ -288,6 +332,7 @@ impl Emitter {
             body_lines.push(body);
         }
         self.const_scopes.pop();
+        self.type_scopes.pop();
 
         let generics = function.generics.clone().unwrap_or_default();
         let return_type = function
@@ -302,6 +347,53 @@ impl Emitter {
             parts.push(body_lines.join("\n"));
         }
         parts.push(self.indent(indent, "end"));
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_enum_decl(&mut self, decl: &EnumDecl, indent: usize) -> Result<String> {
+        let number_backed = decl
+            .base_type
+            .as_deref()
+            .map(|base| base.trim() == "number")
+            .unwrap_or(false);
+
+        let mut variants = Vec::new();
+        let mut members = Vec::new();
+        for member in &decl.members {
+            let value = if let Some(value) = &member.value {
+                let lowered = self.emit_expr(value, None)?;
+                if !lowered.setup.is_empty() {
+                    self.errors.push(format!(
+                        "enum member `{}` value must be a simple expression",
+                        member.name
+                    ));
+                }
+                lowered.expr
+            } else if number_backed {
+                self.errors.push(format!(
+                    "number-backed enum `{}` member `{}` requires an explicit value",
+                    decl.name, member.name
+                ));
+                "0".to_string()
+            } else {
+                format!("\"{}\"", member.name)
+            };
+            variants.push(value.clone());
+            members.push((member.name.clone(), value));
+        }
+
+        let type_alias = if number_backed {
+            format!("type {} = number", decl.name)
+        } else {
+            format!("type {} = {}", decl.name, variants.join(" | "))
+        };
+
+        let mut parts = vec![self.indent(indent, &type_alias)];
+        parts.push(self.indent(indent, &format!("local {} = table.freeze({{", decl.name)));
+        for (name, value) in members {
+            parts.push(self.indent(indent + 1, &format!("{name} = {value} :: {},", decl.name)));
+        }
+        parts.push(self.indent(indent, "})"));
         Ok(parts.join("\n"))
     }
 
@@ -418,6 +510,93 @@ impl Emitter {
             }
         }
         parts.push(self.indent(indent, "end"));
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_switch_stmt(&mut self, switch_stmt: &SwitchStmt, indent: usize) -> Result<String> {
+        self.check_switch_exhaustiveness(switch_stmt);
+        let lowered_value = self.emit_expr(&switch_stmt.value, None)?;
+        let switch_name = self.next_temp("sw");
+        let mut parts = Vec::new();
+        self.push_setup(&mut parts, indent, lowered_value.setup);
+        parts.push(self.indent(
+            indent,
+            &format!("local {switch_name} = {}", lowered_value.expr),
+        ));
+
+        let groups = self.group_switch_cases(&switch_stmt.cases);
+        for (index, group) in groups.iter().enumerate() {
+            let (condition_setup, condition) =
+                self.emit_switch_condition(&switch_name, &group.values)?;
+            self.push_setup(&mut parts, indent, condition_setup);
+            let keyword = if index == 0 { "if" } else { "elseif" };
+            parts.push(self.indent(indent, &format!("{keyword} {condition} then")));
+            let body = self.emit_block(&group.block, indent + 1)?;
+            if !body.is_empty() {
+                parts.push(body);
+            }
+        }
+        if let Some(default) = &switch_stmt.default {
+            if groups.is_empty() {
+                return self.emit_block(default, indent);
+            }
+            parts.push(self.indent(indent, "else"));
+            let body = self.emit_block(default, indent + 1)?;
+            if !body.is_empty() {
+                parts.push(body);
+            }
+        }
+        if !groups.is_empty() {
+            parts.push(self.indent(indent, "end"));
+        }
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_match_stmt(&mut self, match_stmt: &MatchStmt, indent: usize) -> Result<String> {
+        self.check_match_exhaustiveness(match_stmt);
+        let lowered_value = self.emit_expr(&match_stmt.value, None)?;
+        let lowered_value = self.capture_if_needed(lowered_value, "m");
+        let mut parts = Vec::new();
+        self.push_setup(&mut parts, indent, lowered_value.setup);
+        let matched_name = self.next_temp("matched");
+        parts.push(self.indent(indent, &format!("local {matched_name} = false")));
+
+        for case in &match_stmt.cases {
+            let bindings_name = self.next_temp("mbind");
+            let cond_name = self.next_temp("mcond");
+            parts.push(self.indent(indent, "do"));
+            parts.push(self.indent(indent + 1, &format!("local {bindings_name} = {{}}")));
+            let (pattern_setup, pattern_expr) = self.emit_match_pattern_condition(
+                &case.pattern,
+                &lowered_value.expr,
+                &bindings_name,
+            )?;
+            self.push_setup(&mut parts, indent + 1, pattern_setup);
+            parts.push(self.indent(
+                indent + 1,
+                &format!("local {cond_name} = (not {matched_name}) and ({pattern_expr})"),
+            ));
+            if let Some(guard) = &case.guard {
+                parts.push(self.indent(indent + 1, &format!("if {cond_name} then")));
+                self.emit_match_bindings(&mut parts, indent + 2, &bindings_name, &case.pattern);
+                let lowered_guard = self.emit_expr(guard, None)?;
+                self.push_setup(&mut parts, indent + 2, lowered_guard.setup);
+                parts.push(
+                    self.indent(indent + 2, &format!("{cond_name} = {}", lowered_guard.expr)),
+                );
+                parts.push(self.indent(indent + 1, "end"));
+            }
+
+            parts.push(self.indent(indent + 1, &format!("if {cond_name} then")));
+            self.emit_match_bindings(&mut parts, indent + 2, &bindings_name, &case.pattern);
+            parts.push(self.indent(indent + 2, &format!("{matched_name} = true")));
+            let body = self.emit_block(&case.block, indent + 2)?;
+            if !body.is_empty() {
+                parts.push(body);
+            }
+            parts.push(self.indent(indent + 1, "end"));
+            parts.push(self.indent(indent, "end"));
+        }
         Ok(parts.join("\n"))
     }
 
@@ -554,6 +733,231 @@ impl Emitter {
         Ok(parts.join("\n"))
     }
 
+    fn group_switch_cases(&self, cases: &[SwitchCase]) -> Vec<GroupedSwitchCase> {
+        let mut groups = Vec::new();
+        let mut pending_values = Vec::new();
+
+        for case in cases {
+            pending_values.push(case.value.clone());
+            if case.fallthrough || case.block.is_empty() {
+                continue;
+            }
+            groups.push(GroupedSwitchCase {
+                values: std::mem::take(&mut pending_values),
+                block: case.block.clone(),
+            });
+        }
+
+        groups
+    }
+
+    fn emit_switch_condition(
+        &mut self,
+        switch_value: &str,
+        values: &[Expr],
+    ) -> Result<(Vec<String>, String)> {
+        let mut setup = Vec::new();
+        let mut conditions = Vec::new();
+        for value in values {
+            let lowered = self.emit_expr(value, None)?;
+            setup.extend(lowered.setup);
+            conditions.push(format!("{switch_value} == {}", lowered.expr));
+        }
+        Ok((setup, conditions.join(" or ")))
+    }
+
+    fn emit_match_pattern_condition(
+        &mut self,
+        pattern: &MatchPattern,
+        value_expr: &str,
+        bindings_name: &str,
+    ) -> Result<(Vec<String>, String)> {
+        match pattern {
+            MatchPattern::Literal(expr) => {
+                let lowered = self.emit_expr(expr, None)?;
+                Ok((lowered.setup, format!("{value_expr} == {}", lowered.expr)))
+            }
+            MatchPattern::Bind(name) => Ok((
+                vec![format!("{bindings_name}[\"{name}\"] = {value_expr}")],
+                "true".to_string(),
+            )),
+            MatchPattern::Table(fields) => {
+                let mut setup = Vec::new();
+                let mut conditions = vec![format!("type({value_expr}) == \"table\"")];
+                for field in fields {
+                    let access = format!("{value_expr}.{}", field.key);
+                    let (field_setup, field_condition) =
+                        self.emit_match_pattern_condition(&field.pattern, &access, bindings_name)?;
+                    setup.extend(field_setup);
+                    conditions.push(field_condition);
+                }
+                Ok((setup, conditions.join(" and ")))
+            }
+        }
+    }
+
+    fn emit_match_bindings(
+        &mut self,
+        parts: &mut Vec<String>,
+        indent: usize,
+        bindings_name: &str,
+        pattern: &MatchPattern,
+    ) {
+        for name in self.match_pattern_bindings(pattern) {
+            parts.push(self.indent(
+                indent,
+                &format!("local {name} = {bindings_name}[\"{name}\"]"),
+            ));
+        }
+    }
+
+    fn emit_comprehension_clauses(
+        &mut self,
+        setup: &mut Vec<String>,
+        indent: usize,
+        table_name: &str,
+        kind: &TableComprehensionKind,
+        clauses: &[ComprehensionClause],
+        placeholder: Option<&str>,
+    ) -> Result<()> {
+        if clauses.is_empty() {
+            return self.emit_comprehension_insert(setup, indent, table_name, kind, placeholder);
+        }
+
+        match &clauses[0] {
+            ComprehensionClause::GenericFor {
+                bindings,
+                iterables,
+            } => {
+                let mut iter_setup = Vec::new();
+                let mut iterable_values = Vec::new();
+                for iterable in iterables {
+                    let lowered = self.emit_expr(iterable, placeholder)?;
+                    iter_setup.extend(lowered.setup);
+                    iterable_values.push(lowered.expr);
+                }
+                setup.extend(self.indent_lines(indent, iter_setup));
+
+                let mut loop_names = Vec::new();
+                let mut prologue = Vec::new();
+                for binding in bindings {
+                    if let Some(name) = self.pattern_name(&binding.pattern) {
+                        loop_names.push(name.to_string());
+                    } else {
+                        let temp = self.next_temp("for");
+                        loop_names.push(temp.clone());
+                        self.emit_pattern_local(
+                            &mut prologue,
+                            0,
+                            &binding.pattern,
+                            &binding.type_annotation,
+                            &temp,
+                            true,
+                        )?;
+                    }
+                }
+
+                setup.push(self.indent(
+                    indent,
+                    &format!(
+                        "for {} in {} do",
+                        loop_names.join(", "),
+                        iterable_values.join(", ")
+                    ),
+                ));
+                setup.extend(self.indent_lines(indent + 1, prologue));
+                self.emit_comprehension_clauses(
+                    setup,
+                    indent + 1,
+                    table_name,
+                    kind,
+                    &clauses[1..],
+                    placeholder,
+                )?;
+                setup.push(self.indent(indent, "end"));
+            }
+            ComprehensionClause::NumericFor {
+                name,
+                start,
+                end,
+                step,
+            } => {
+                let lowered_start = self.emit_expr(start, placeholder)?;
+                let lowered_end = self.emit_expr(end, placeholder)?;
+                let lowered_step = if let Some(step) = step {
+                    Some(self.emit_expr(step, placeholder)?)
+                } else {
+                    None
+                };
+                setup.extend(self.indent_lines(indent, lowered_start.setup));
+                setup.extend(self.indent_lines(indent, lowered_end.setup));
+                if let Some(step) = &lowered_step {
+                    setup.extend(self.indent_lines(indent, step.setup.clone()));
+                }
+                let range = if let Some(step) = lowered_step {
+                    format!(
+                        "{}, {}, {}",
+                        lowered_start.expr, lowered_end.expr, step.expr
+                    )
+                } else {
+                    format!("{}, {}", lowered_start.expr, lowered_end.expr)
+                };
+                setup.push(self.indent(indent, &format!("for {name} = {range} do")));
+                self.emit_comprehension_clauses(
+                    setup,
+                    indent + 1,
+                    table_name,
+                    kind,
+                    &clauses[1..],
+                    placeholder,
+                )?;
+                setup.push(self.indent(indent, "end"));
+            }
+            ComprehensionClause::Filter(condition) => {
+                let lowered = self.emit_expr(condition, placeholder)?;
+                setup.extend(self.indent_lines(indent, lowered.setup));
+                setup.push(self.indent(indent, &format!("if {} then", lowered.expr)));
+                self.emit_comprehension_insert(setup, indent + 1, table_name, kind, placeholder)?;
+                setup.push(self.indent(indent, "end"));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_comprehension_insert(
+        &mut self,
+        setup: &mut Vec<String>,
+        indent: usize,
+        table_name: &str,
+        kind: &TableComprehensionKind,
+        placeholder: Option<&str>,
+    ) -> Result<()> {
+        match kind {
+            TableComprehensionKind::Array { value } => {
+                let lowered = self.emit_expr(value, placeholder)?;
+                setup.extend(self.indent_lines(indent, lowered.setup));
+                setup.push(self.indent(
+                    indent,
+                    &format!("table.insert({table_name}, {})", lowered.expr),
+                ));
+            }
+            TableComprehensionKind::Map { key, value } => {
+                let lowered_key = self.emit_expr(key, placeholder)?;
+                let lowered_value = self.emit_expr(value, placeholder)?;
+                setup.extend(self.indent_lines(indent, lowered_key.setup));
+                setup.extend(self.indent_lines(indent, lowered_value.setup));
+                setup.push(self.indent(
+                    indent,
+                    &format!(
+                        "{table_name}[{}] = {}",
+                        lowered_key.expr, lowered_value.expr
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn emit_assign_target(
         &mut self,
         target: &AssignTarget,
@@ -663,10 +1067,19 @@ impl Emitter {
                 branches,
                 else_expr,
             } => self.emit_if_expr(branches, else_expr, placeholder),
+            Expr::DoExpr { block, result } => self.emit_do_expr(block, result, placeholder),
+            Expr::SwitchExpr {
+                value,
+                cases,
+                default,
+            } => self.emit_switch_expr(value, cases, default, placeholder),
             Expr::Table(fields) => self.emit_table_expr(fields, placeholder),
             Expr::Function(function) => self.emit_function_expr(function, placeholder),
             Expr::Chain { base, segments } => self.emit_chain_expr(base, segments, placeholder),
             Expr::Pipe { left, stages } => self.emit_pipe_expr(left, stages, placeholder),
+            Expr::Comprehension(comprehension) => {
+                self.emit_comprehension_expr(comprehension, placeholder)
+            }
         }
     }
 
@@ -842,6 +1255,67 @@ impl Emitter {
         })
     }
 
+    fn emit_do_expr(
+        &mut self,
+        block: &Block,
+        result: &Expr,
+        placeholder: Option<&str>,
+    ) -> Result<LoweredExpr> {
+        let result_name = self.next_temp("de");
+        let mut setup = vec![format!("local {result_name}")];
+        setup.push("do".to_string());
+        let body = self.emit_block(block, 1)?;
+        if !body.is_empty() {
+            setup.extend(body.lines().map(ToString::to_string));
+        }
+        let lowered_result = self.emit_expr(result, placeholder)?;
+        setup.extend(self.indent_lines(1, lowered_result.setup));
+        setup.push(self.indent(1, &format!("{result_name} = {}", lowered_result.expr)));
+        setup.push("end".to_string());
+        Ok(LoweredExpr {
+            setup,
+            expr: result_name,
+            reuse_safe: false,
+        })
+    }
+
+    fn emit_switch_expr(
+        &mut self,
+        value: &Expr,
+        cases: &[SwitchExprCase],
+        default: &Expr,
+        placeholder: Option<&str>,
+    ) -> Result<LoweredExpr> {
+        let lowered_value = self.emit_expr(value, placeholder)?;
+        let result_name = self.next_temp("swexpr");
+        let switch_name = self.next_temp("sw");
+        let mut setup = lowered_value.setup;
+        setup.push(format!("local {switch_name} = {}", lowered_value.expr));
+        setup.push(format!("local {result_name}"));
+        for (index, case) in cases.iter().enumerate() {
+            let lowered_case = self.emit_expr(&case.value, placeholder)?;
+            setup.extend(lowered_case.setup);
+            let lowered_result = self.emit_expr(&case.result, placeholder)?;
+            let keyword = if index == 0 { "if" } else { "elseif" };
+            setup.push(format!(
+                "{keyword} {} == {} then",
+                switch_name, lowered_case.expr
+            ));
+            setup.extend(self.indent_lines(1, lowered_result.setup));
+            setup.push(self.indent(1, &format!("{result_name} = {}", lowered_result.expr)));
+        }
+        let lowered_default = self.emit_expr(default, placeholder)?;
+        setup.push("else".to_string());
+        setup.extend(self.indent_lines(1, lowered_default.setup));
+        setup.push(self.indent(1, &format!("{result_name} = {}", lowered_default.expr)));
+        setup.push("end".to_string());
+        Ok(LoweredExpr {
+            setup,
+            expr: result_name,
+            reuse_safe: false,
+        })
+    }
+
     fn emit_table_expr(
         &mut self,
         fields: &[TableField],
@@ -873,6 +1347,28 @@ impl Emitter {
         Ok(LoweredExpr {
             setup,
             expr: format!("{{{}}}", rendered.join(", ")),
+            reuse_safe: false,
+        })
+    }
+
+    fn emit_comprehension_expr(
+        &mut self,
+        comprehension: &TableComprehension,
+        placeholder: Option<&str>,
+    ) -> Result<LoweredExpr> {
+        let table_name = self.next_temp("comp");
+        let mut setup = vec![format!("local {table_name} = {{}}")];
+        self.emit_comprehension_clauses(
+            &mut setup,
+            0,
+            &table_name,
+            &comprehension.kind,
+            &comprehension.clauses,
+            placeholder,
+        )?;
+        Ok(LoweredExpr {
+            setup,
+            expr: table_name,
             reuse_safe: false,
         })
     }
@@ -1189,6 +1685,356 @@ impl Emitter {
         Ok((rendered, prologue))
     }
 
+    fn register_enum_type(&mut self, decl: &EnumDecl) {
+        let mut values = Vec::new();
+        let mut members = HashMap::new();
+        let number_backed = decl
+            .base_type
+            .as_deref()
+            .map(|base| base.trim() == "number")
+            .unwrap_or(false);
+
+        for member in &decl.members {
+            let value = if let Some(value) = &member.value {
+                self.literal_key(value)
+                    .unwrap_or_else(|| self.expr_key(value).unwrap_or_default())
+            } else if number_backed {
+                "0".to_string()
+            } else {
+                format!("\"{}\"", member.name)
+            };
+            values.push(value.clone());
+            members.insert(member.name.clone(), value);
+        }
+
+        self.type_defs
+            .insert(decl.name.clone(), TypeShape::Enum { values, members });
+    }
+
+    fn register_type_alias(&mut self, raw: &str) {
+        let Some((name, shape)) = self.parse_type_alias_shape(raw) else {
+            return;
+        };
+        self.type_defs.insert(name, shape);
+    }
+
+    fn parse_type_alias_shape(&self, raw: &str) -> Option<(String, TypeShape)> {
+        let trimmed = raw.trim();
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let rest = trimmed.strip_prefix("type ")?;
+        let eq_index = rest.find('=')?;
+        let name = rest[..eq_index]
+            .trim()
+            .split('<')
+            .next()?
+            .trim()
+            .to_string();
+        let rhs = rest[eq_index + 1..].trim();
+
+        if let Some(values) = self.parse_literal_union(rhs) {
+            return Some((name, TypeShape::LiteralUnion(values)));
+        }
+        if let Some((field, variants)) = self.parse_discriminated_union(rhs) {
+            return Some((name, TypeShape::DiscriminatedUnion { field, variants }));
+        }
+        None
+    }
+
+    fn parse_literal_union(&self, rhs: &str) -> Option<Vec<String>> {
+        let parts = self.split_top_level(rhs, '|');
+        if parts.len() < 2 {
+            return None;
+        }
+        let mut values = Vec::new();
+        for part in parts {
+            let piece = part.trim();
+            if self.is_literal_text(piece) {
+                values.push(piece.to_string());
+            } else {
+                return None;
+            }
+        }
+        Some(values)
+    }
+
+    fn parse_discriminated_union(&self, rhs: &str) -> Option<(String, Vec<String>)> {
+        let parts = self.split_top_level(rhs, '|');
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let mut parsed_variants = Vec::new();
+        for part in parts {
+            parsed_variants.push(self.parse_type_table_literal_fields(part.trim())?);
+        }
+
+        let candidate_fields = parsed_variants.first()?.keys().cloned().collect::<Vec<_>>();
+        for field in candidate_fields {
+            let mut variants = Vec::new();
+            let mut valid = true;
+            for variant in &parsed_variants {
+                let Some(value) = variant.get(&field) else {
+                    valid = false;
+                    break;
+                };
+                variants.push(value.clone());
+            }
+            if valid {
+                return Some((field, variants));
+            }
+        }
+        None
+    }
+
+    fn parse_type_table_literal_fields(&self, text: &str) -> Option<HashMap<String, String>> {
+        let trimmed = text.trim();
+        if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+            return None;
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let mut fields = HashMap::new();
+        for part in self.split_top_level(inner, ',') {
+            let piece = part.trim();
+            if piece.is_empty() {
+                continue;
+            }
+            let colon_index = piece.find(':')?;
+            let key = piece[..colon_index].trim().to_string();
+            let value = piece[colon_index + 1..].trim();
+            if self.is_literal_text(value) {
+                fields.insert(key, value.to_string());
+            }
+        }
+        if fields.is_empty() {
+            None
+        } else {
+            Some(fields)
+        }
+    }
+
+    fn split_top_level<'a>(&self, text: &'a str, delimiter: char) -> Vec<&'a str> {
+        let mut parts = Vec::new();
+        let mut start = 0usize;
+        let mut paren = 0usize;
+        let mut brace = 0usize;
+        let mut bracket = 0usize;
+        let mut angle = 0usize;
+        let mut in_string: Option<char> = None;
+        let mut escaped = false;
+
+        for (index, ch) in text.char_indices() {
+            if let Some(quote) = in_string {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == quote {
+                    in_string = None;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' | '\'' | '`' => in_string = Some(ch),
+                '(' => paren += 1,
+                ')' => paren = paren.saturating_sub(1),
+                '{' => brace += 1,
+                '}' => brace = brace.saturating_sub(1),
+                '[' => bracket += 1,
+                ']' => bracket = bracket.saturating_sub(1),
+                '<' => angle += 1,
+                '>' => angle = angle.saturating_sub(1),
+                _ if ch == delimiter && paren == 0 && brace == 0 && bracket == 0 && angle == 0 => {
+                    parts.push(&text[start..index]);
+                    start = index + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        parts.push(&text[start..]);
+        parts
+    }
+
+    fn is_literal_text(&self, text: &str) -> bool {
+        let trimmed = text.trim();
+        (trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+            || trimmed == "true"
+            || trimmed == "false"
+            || trimmed == "nil"
+            || trimmed
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-' | '_'))
+    }
+
+    fn declare_param_types(&mut self, params: &[Param]) {
+        for param in params {
+            if let Param::Binding(binding) = param {
+                self.declare_pattern_types(&binding.pattern, &binding.type_annotation);
+            }
+        }
+    }
+
+    fn declare_pattern_types(&mut self, pattern: &Pattern, annotation: &Option<String>) {
+        let Some(type_name) = annotation
+            .as_ref()
+            .and_then(|annotation| self.simple_type_name(annotation))
+        else {
+            return;
+        };
+
+        for name in self.pattern_names(pattern) {
+            if let Some(scope) = self.type_scopes.last_mut() {
+                scope.insert(name, type_name.clone());
+            }
+        }
+    }
+
+    fn simple_type_name(&self, annotation: &str) -> Option<String> {
+        let trimmed = annotation.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let name = trimmed
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .next()?;
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    fn infer_expr_type(&self, expr: &Expr) -> Option<&TypeShape> {
+        let owned_name = match expr {
+            Expr::Name(name) => name.clone(),
+            Expr::TypeAssertion { annotation, .. } => self.simple_type_name(annotation)?,
+            _ => return None,
+        };
+
+        if let Some(type_name) = self.lookup_type_name(&owned_name) {
+            return self.type_defs.get(type_name);
+        }
+        self.type_defs.get(&owned_name)
+    }
+
+    fn lookup_type_name(&self, name: &str) -> Option<&str> {
+        for scope in self.type_scopes.iter().rev() {
+            if let Some(type_name) = scope.get(name) {
+                return Some(type_name);
+            }
+        }
+        None
+    }
+
+    fn check_switch_exhaustiveness(&mut self, switch_stmt: &SwitchStmt) {
+        if switch_stmt.default.is_some() {
+            return;
+        }
+        let Some(type_shape) = self.infer_expr_type(&switch_stmt.value).cloned() else {
+            return;
+        };
+
+        let expected = match type_shape {
+            TypeShape::LiteralUnion(values) => values,
+            TypeShape::Enum { values, .. } => values,
+            TypeShape::DiscriminatedUnion { .. } => return,
+        };
+
+        let mut seen = HashSet::new();
+        for case in &switch_stmt.cases {
+            if let Some(value) = self.expr_key(&case.value) {
+                seen.insert(value);
+            }
+        }
+
+        let missing = expected
+            .into_iter()
+            .filter(|value| !seen.contains(value))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            self.errors.push(format!(
+                "non-exhaustive switch is missing: {}",
+                missing.join(", ")
+            ));
+        }
+    }
+
+    fn check_match_exhaustiveness(&mut self, match_stmt: &MatchStmt) {
+        let Some(TypeShape::DiscriminatedUnion { field, variants }) =
+            self.infer_expr_type(&match_stmt.value).cloned()
+        else {
+            return;
+        };
+
+        let mut seen = HashSet::new();
+        for case in &match_stmt.cases {
+            if case.guard.is_some() {
+                continue;
+            }
+            if let Some(value) = self.match_case_variant(&case.pattern, &field) {
+                seen.insert(value);
+            }
+        }
+
+        let missing = variants
+            .into_iter()
+            .filter(|value| !seen.contains(value))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            self.errors.push(format!(
+                "non-exhaustive match is missing variants for `{}`: {}",
+                field,
+                missing.join(", ")
+            ));
+        }
+    }
+
+    fn match_case_variant(&self, pattern: &MatchPattern, field: &str) -> Option<String> {
+        let MatchPattern::Table(fields) = pattern else {
+            return None;
+        };
+        let entry = fields.iter().find(|entry| entry.key == field)?;
+        match &entry.pattern {
+            MatchPattern::Literal(expr) => self.expr_key(expr),
+            _ => None,
+        }
+    }
+
+    fn expr_key(&self, expr: &Expr) -> Option<String> {
+        if let Some(literal) = self.literal_key(expr) {
+            return Some(literal);
+        }
+
+        if let Expr::Chain { base, segments } = expr
+            && let Expr::Name(root) = &**base
+            && segments.len() == 1
+            && let ChainSegment::Field { name, safe: false } = &segments[0]
+            && let Some(TypeShape::Enum { members, .. }) = self.type_defs.get(root)
+        {
+            return members.get(name).cloned();
+        }
+
+        None
+    }
+
+    fn literal_key(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::String(value) | Expr::Number(value) => Some(value.clone()),
+            Expr::Bool(value) => Some(if *value {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }),
+            Expr::Nil => Some("nil".to_string()),
+            Expr::Paren(inner) => self.literal_key(inner),
+            _ => None,
+        }
+    }
+
     fn collect_param_names(&self, params: &[Param]) -> Vec<String> {
         let mut names = Vec::new();
         for param in params {
@@ -1233,6 +2079,19 @@ impl Emitter {
                     self.contains_placeholder(condition) || self.contains_placeholder(value)
                 }) || self.contains_placeholder(else_expr)
             }
+            Expr::DoExpr { result, .. } => self.contains_placeholder(result),
+            Expr::SwitchExpr {
+                value,
+                cases,
+                default,
+            } => {
+                self.contains_placeholder(value)
+                    || cases.iter().any(|case| {
+                        self.contains_placeholder(&case.value)
+                            || self.contains_placeholder(&case.result)
+                    })
+                    || self.contains_placeholder(default)
+            }
             Expr::Chain { base, segments } => {
                 self.contains_placeholder(base)
                     || segments.iter().any(|segment| match segment {
@@ -1252,6 +2111,47 @@ impl Emitter {
                         PipeStage::Expr { callee } => self.contains_placeholder(callee),
                     })
             }
+            Expr::Comprehension(comprehension) => match &comprehension.kind {
+                TableComprehensionKind::Array { value } => {
+                    self.contains_placeholder(value)
+                        || comprehension.clauses.iter().any(|clause| match clause {
+                            ComprehensionClause::GenericFor { iterables, .. } => iterables
+                                .iter()
+                                .any(|iterable| self.contains_placeholder(iterable)),
+                            ComprehensionClause::NumericFor {
+                                start, end, step, ..
+                            } => {
+                                self.contains_placeholder(start)
+                                    || self.contains_placeholder(end)
+                                    || step
+                                        .as_ref()
+                                        .map(|step| self.contains_placeholder(step))
+                                        .unwrap_or(false)
+                            }
+                            ComprehensionClause::Filter(expr) => self.contains_placeholder(expr),
+                        })
+                }
+                TableComprehensionKind::Map { key, value } => {
+                    self.contains_placeholder(key)
+                        || self.contains_placeholder(value)
+                        || comprehension.clauses.iter().any(|clause| match clause {
+                            ComprehensionClause::GenericFor { iterables, .. } => iterables
+                                .iter()
+                                .any(|iterable| self.contains_placeholder(iterable)),
+                            ComprehensionClause::NumericFor {
+                                start, end, step, ..
+                            } => {
+                                self.contains_placeholder(start)
+                                    || self.contains_placeholder(end)
+                                    || step
+                                        .as_ref()
+                                        .map(|step| self.contains_placeholder(step))
+                                        .unwrap_or(false)
+                            }
+                            ComprehensionClause::Filter(expr) => self.contains_placeholder(expr),
+                        })
+                }
+            },
             Expr::Function(_)
             | Expr::Nil
             | Expr::Bool(_)
@@ -1303,6 +2203,20 @@ impl Emitter {
                 }
                 if let Some(rest) = rest {
                     names.push(rest.clone());
+                }
+            }
+        }
+        names
+    }
+
+    fn match_pattern_bindings(&self, pattern: &MatchPattern) -> Vec<String> {
+        let mut names = Vec::new();
+        match pattern {
+            MatchPattern::Literal(_) => {}
+            MatchPattern::Bind(name) => names.push(name.clone()),
+            MatchPattern::Table(fields) => {
+                for field in fields {
+                    names.extend(self.match_pattern_bindings(&field.pattern));
                 }
             }
         }
