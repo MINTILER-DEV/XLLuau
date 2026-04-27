@@ -4,6 +4,7 @@ pub mod config;
 pub mod emitter;
 pub mod formatter;
 pub mod lexer;
+pub mod module;
 pub mod parser;
 
 pub use compiler::{BuildArtifact, Compiler};

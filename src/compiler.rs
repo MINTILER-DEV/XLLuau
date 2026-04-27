@@ -8,7 +8,12 @@ use luau_parser::parser::Parser as LuauParser;
 use thiserror::Error;
 
 use crate::{
-    config::XluauConfig, emitter::Emitter, formatter::format_luau, lexer::Lexer, parser::Parser,
+    config::XluauConfig,
+    emitter::Emitter,
+    formatter::format_luau,
+    lexer::Lexer,
+    module::{ModuleResolver, detect_circular_dependencies},
+    parser::Parser,
 };
 
 pub type Result<T> = std::result::Result<T, CompilerError>;
@@ -62,17 +67,7 @@ impl Compiler {
     }
 
     pub fn compile_source(&self, source: &str) -> Result<String> {
-        if self.validate_luau(source).is_ok() {
-            return format_luau(source);
-        }
-
-        let tokens = Lexer::new(source).tokenize()?;
-        let mut parser = Parser::new(source, tokens);
-        let program = parser.parse_program()?;
-        let mut emitter = Emitter::new();
-        let raw = emitter.emit_program(&program)?;
-        self.validate_luau(&raw)?;
-        format_luau(&raw)
+        self.compile_source_with_path(source, Path::new("<memory>"))
     }
 
     pub fn build_file(&self, path: &Path) -> Result<BuildArtifact> {
@@ -81,11 +76,12 @@ impl Compiler {
         } else {
             self.root.join(path)
         };
+        self.check_cycles(std::slice::from_ref(&input))?;
         let source = fs::read_to_string(&input).map_err(|source| CompilerError::Io {
             path: input.clone(),
             source,
         })?;
-        let luau = self.compile_source(&source)?;
+        let luau = self.compile_source_with_path(&source, &input)?;
         let output = self.output_path_for(&input)?;
         Ok(BuildArtifact {
             input,
@@ -95,6 +91,27 @@ impl Compiler {
     }
 
     pub fn build_project(&self) -> Result<Vec<BuildArtifact>> {
+        let files = self.collect_project_files()?;
+        self.check_cycles(&files)?;
+
+        let mut artifacts = Vec::new();
+        for path in files {
+            let source = fs::read_to_string(&path).map_err(|source| CompilerError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let luau = self.compile_source_with_path(&source, &path)?;
+            let output = self.output_path_for(&path)?;
+            artifacts.push(BuildArtifact {
+                input: path,
+                output,
+                luau,
+            });
+        }
+        Ok(artifacts)
+    }
+
+    fn collect_project_files(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         for pattern in &self.config.include {
             let absolute = self.root.join(pattern);
@@ -114,7 +131,7 @@ impl Compiler {
                 {
                     continue;
                 }
-                files.push(self.build_file(&path)?);
+                files.push(path);
             }
         }
         Ok(files)
@@ -144,9 +161,8 @@ impl Compiler {
     }
 
     fn validate_luau(&self, source: &str) -> Result<()> {
-        let mut parser = LuauParser::new(source);
-        let cst = parser.parse("<memory>");
-        if cst.errors.is_empty() {
+        let cst = Self::parse_luau(source, "<memory>");
+        if cst.errors.is_empty() || Self::wrapped_chunk_is_valid(source) {
             Ok(())
         } else {
             Err(CompilerError::Validation {
@@ -159,14 +175,75 @@ impl Compiler {
             })
         }
     }
+
+    fn parse_luau(source: &str, uri: &str) -> luau_parser::types::Pointer<luau_parser::types::Cst> {
+        let mut parser = LuauParser::new(source);
+        parser.parse(uri)
+    }
+
+    fn wrapped_chunk_is_valid(source: &str) -> bool {
+        let wrapped = format!("do\n{source}\nend");
+        Self::parse_luau(&wrapped, "<memory:wrapped>")
+            .errors
+            .is_empty()
+    }
+
+    fn compile_source_with_path(&self, source: &str, path: &Path) -> Result<String> {
+        let resolver = self.module_resolver();
+        let rewritten_source = resolver.rewrite_requires(source, path)?;
+        if self.validate_luau(&rewritten_source).is_ok() {
+            return format_luau(&rewritten_source);
+        }
+
+        let tokens = Lexer::new(source).tokenize()?;
+        let mut parser = Parser::new(source, tokens);
+        let program = parser.parse_program()?;
+        let mut emitter = Emitter::new();
+        let raw = emitter.emit_program(&program)?;
+        let rewritten_output = resolver.rewrite_requires(&raw, path)?;
+        self.validate_luau(&rewritten_output)?;
+        format_luau(&rewritten_output)
+    }
+
+    fn module_resolver(&self) -> ModuleResolver {
+        ModuleResolver::new(self.root.clone(), self.config.clone())
+    }
+
+    fn check_cycles(&self, entry_points: &[PathBuf]) -> Result<()> {
+        detect_circular_dependencies(&self.module_resolver(), entry_points)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::Compiler;
 
     fn compiler() -> Compiler {
         Compiler::discover(".").expect("compiler")
+    }
+
+    fn temp_project(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("xluau_{name}_{nonce}"));
+        fs::create_dir_all(&root).expect("temp project root");
+        root
+    }
+
+    fn write_file(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent");
+        }
+        fs::write(path, contents).expect("write file");
     }
 
     #[test]
@@ -278,5 +355,178 @@ stats.total += 1
         assert!(output.contains("(value :: number)"));
         assert!(output.contains("stats.total = stats.total + 1"));
         assert!(output.contains("if _lhs"));
+    }
+
+    #[test]
+    fn accepts_top_level_return_in_luau_passthrough() {
+        let source = r#"
+local value = 1
+return value
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("local value = 1"));
+        assert!(output.contains("return value"));
+    }
+
+    #[test]
+    fn resolves_aliases_and_index_files_for_filesystem_target() {
+        let root = temp_project("phase3_filesystem");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "filesystem",
+  "paths": {
+    "@shared": "./src/shared"
+  }
+}"#,
+        );
+        write_file(
+            &root,
+            "src/main.xl",
+            r#"local utils = require "@shared/utils"
+local math = require("@shared/math")
+"#,
+        );
+        write_file(&root, "src/shared/utils/init.xl", "return {}");
+        write_file(&root, "src/shared/math.xl", "return {}");
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
+        assert!(artifact.luau.contains(r#"require("./src/shared/utils")"#));
+        assert!(artifact.luau.contains(r#"require("./src/shared/math")"#));
+    }
+
+    #[test]
+    fn resolves_wildcard_aliases_for_filesystem_target() {
+        let root = temp_project("phase3_filesystem_wildcard");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "filesystem",
+  "paths": {
+    "@shared/*": "./src/shared/*"
+  }
+}"#,
+        );
+        write_file(
+            &root,
+            "src/main.xl",
+            r#"local math = require "@shared/math""#,
+        );
+        write_file(&root, "src/shared/math.xl", "return {}");
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
+        assert!(artifact.luau.contains(r#"require("./src/shared/math")"#));
+    }
+
+    #[test]
+    fn resolves_aliases_for_roblox_target() {
+        let root = temp_project("phase3_roblox");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "roblox",
+  "paths": {
+    "@shared": "./src/shared"
+  }
+}"#,
+        );
+        write_file(
+            &root,
+            "src/server/main.xl",
+            r#"local math = require "@shared/math""#,
+        );
+        write_file(&root, "src/shared/math.xl", "return {}");
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler
+            .build_file(&root.join("src/server/main.xl"))
+            .unwrap();
+        assert!(
+            artifact
+                .luau
+                .contains("require(script.Parent.Parent.shared.math)")
+        );
+    }
+
+    #[test]
+    fn resolves_aliases_for_custom_target() {
+        let root = temp_project("phase3_custom");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "custom",
+  "customTargetFunction": "resolveModule",
+  "paths": {
+    "@shared": "./src/shared"
+  }
+}"#,
+        );
+        write_file(
+            &root,
+            "src/main.xl",
+            r#"local math = require "@shared/math""#,
+        );
+        write_file(&root, "src/shared/math.xl", "return {}");
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
+        assert!(
+            artifact
+                .luau
+                .contains(r#"require(resolveModule("shared/math"))"#)
+        );
+    }
+
+    #[test]
+    fn detects_circular_dependencies() {
+        let root = temp_project("phase3_cycle");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "filesystem",
+  "paths": {
+    "@app": "./src"
+  }
+}"#,
+        );
+        write_file(&root, "src/main.xl", r#"local a = require "@app/a""#);
+        write_file(&root, "src/a.xl", r#"local b = require "@app/b""#);
+        write_file(&root, "src/b.xl", r#"local c = require "@app/c""#);
+        write_file(&root, "src/c.xl", r#"local a = require "@app/a""#);
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let error = compiler.build_file(&root.join("src/main.xl")).unwrap_err();
+        assert!(format!("{error}").contains("Circular dependency detected"));
+        assert!(format!("{error}").contains("src/a.xl"));
+        assert!(format!("{error}").contains("src/b.xl"));
+        assert!(format!("{error}").contains("src/c.xl"));
+    }
+
+    #[test]
+    fn leaves_non_alias_string_requires_unchanged() {
+        let source = r#"
+local sibling = require "./sibling"
+local parent = require("../parent")
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains(r#"require "./sibling""#));
+        assert!(output.contains(r#"require("../parent")"#));
     }
 }

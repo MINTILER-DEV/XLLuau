@@ -20,6 +20,8 @@ pub struct XluauConfig {
     pub out_dir: PathBuf,
     #[serde(default = "default_target")]
     pub target: String,
+    #[serde(default)]
+    pub custom_target_function: Option<String>,
     #[serde(default = "default_luau_target")]
     pub luau_target: String,
     #[serde(default = "default_base_dir")]
@@ -52,6 +54,7 @@ impl Default for XluauConfig {
             exclude: Vec::new(),
             out_dir: default_out_dir(),
             target: default_target(),
+            custom_target_function: None,
             luau_target: default_luau_target(),
             base_dir: default_base_dir(),
             paths: BTreeMap::new(),
