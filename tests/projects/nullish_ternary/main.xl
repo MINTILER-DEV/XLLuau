@@ -1,0 +1,3 @@
+local timeout = config.timeout ?? 30
+local role = isAdmin ? "admin" : "user"
+local retries = primary ?? secondary ?? 5

@@ -1,0 +1,14 @@
+const DEFAULT_TIMEOUT = 30
+
+local { timeout = DEFAULT_TIMEOUT, filters } = config
+stats.total ??= 0
+stats.total += 1
+
+local selected = data?.items?.[1] ?? fallback
+local normalized = filters |> map(_, normalize) |> filter(_, isValid)
+local label = (selected :: any) ? "loaded" : "empty"
+
+function summarize({ name, score }: PlayerRecord)
+    local safeScore = score ?? 0
+    return name, safeScore
+end

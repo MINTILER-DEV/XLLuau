@@ -1,0 +1,3 @@
+local words = raw |> :trim() |> :lower() |> :split(" ")
+local health = player?.Character?.Humanoid?.GetHealth()
+local first = list?.[1]
