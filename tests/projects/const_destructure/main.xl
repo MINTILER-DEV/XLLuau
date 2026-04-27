@@ -1,12 +1,19 @@
+local point = { x = 10, y = 20, extra = true }
+local values = { "alpha", "beta", "gamma", "delta", "epsilon" }
+local players = {{ name = "Ada", score = 10 }, { name = "Lin", score = 20 }}
+
 const PI = 3.14
 
 local { x, y: posY, role = "user", ...rest } = point
 local [head, _, third, ...tail] = values
 
-function update({ x, y }: Point, [first, ...others]: ArrayLike)
+function update({ x, y }: any, [first, ...others]: any)
     return x, y, first, others
 end
 
 for { name, score } in players do
     print(name, score)
 end
+
+print(PI, x, posY, role, rest.extra, head, third, #tail)
+print(update(point, values))

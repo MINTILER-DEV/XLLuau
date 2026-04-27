@@ -6,3 +6,6 @@ Each project contains:
 
 The integration test in `tests/projects.rs` compiles each fixture and compares the
 result to `expected.luau`.
+
+The fixtures are intended to be self-contained examples as well, so they define
+their own sample input data instead of assuming globals exist at runtime.

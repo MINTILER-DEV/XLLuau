@@ -1,3 +1,14 @@
+local raw = "  HeLLo WoRLD  "
+local player = {}
+player.Character = {}
+player.Character.Humanoid = {}
+player.Character.Humanoid.GetHealth = function()
+    return 100
+end
+local list = {}
+
 local words = raw |> :trim() |> :lower() |> :split(" ")
 local health = player?.Character?.Humanoid?.GetHealth()
 local first = list?.[1]
+
+print(table.concat(words, ", "), health, first)

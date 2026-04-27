@@ -1,3 +1,10 @@
+local config = {}
+local isAdmin = false
+local primary = nil
+local secondary = 5
+
 local timeout = config.timeout ?? 30
 local role = isAdmin ? "admin" : "user"
 local retries = primary ?? secondary ?? 5
+
+print(timeout, role, retries)

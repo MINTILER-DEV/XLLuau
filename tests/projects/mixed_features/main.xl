@@ -1,5 +1,36 @@
 const DEFAULT_TIMEOUT = 30
 
+local config = { filters = { 1, 2, 3, 4, 5 } }
+local stats = { total = 0 }
+local data = { items = {} }
+local fallback = "fallback-item"
+
+local function normalize(value: number): number
+    return value * 10
+end
+
+local function isValid(value: number): boolean
+    return value >= 20
+end
+
+local function map(list, fn)
+    local result = {}
+    for _, value in list do
+        table.insert(result, fn(value))
+    end
+    return result
+end
+
+local function filter(list, fn)
+    local result = {}
+    for _, value in list do
+        if fn(value) then
+            table.insert(result, value)
+        end
+    end
+    return result
+end
+
 local { timeout = DEFAULT_TIMEOUT, filters } = config
 stats.total ??= 0
 stats.total += 1
@@ -8,7 +39,10 @@ local selected = data?.items?.[1] ?? fallback
 local normalized = filters |> map(_, normalize) |> filter(_, isValid)
 local label = (selected :: any) ? "loaded" : "empty"
 
-function summarize({ name, score }: PlayerRecord)
+function summarize({ name, score }: any)
     local safeScore = score ?? 0
     return name, safeScore
 end
+
+print(timeout, stats.total, selected, label, #normalized)
+print(summarize({ name = "Eve", score = nil }))

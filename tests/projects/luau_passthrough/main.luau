@@ -1,6 +1,7 @@
 export type Box<T = string> = { value: T }
 
 local foo: { [string]: number, bar: (number, string) -> () } = {
+    a = 0,
     bar = function(_x, _y)
     end,
 }
@@ -16,3 +17,5 @@ for key, value in foo do
         continue
     end
 end
+
+print(label, foo["a"])
