@@ -15,6 +15,10 @@ Phase 4 adds fixture projects for:
 - `match` + table comprehensions
 - a combined sample that exercises features from phases 1 through 4 together
 
+Phase 5 adds fixture projects for:
+- type-system features such as generic constraints, explicit type arguments, utility types, and `freeze`
+- a combined sample that exercises features from phases 1 through 5 together
+
 Phase 3 module-system fixtures live under `tests/module_projects/`.
 
 Those fixtures include their own `xluau.config.json` files plus small source trees

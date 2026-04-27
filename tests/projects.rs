@@ -78,6 +78,16 @@ fn project_all_features() {
 }
 
 #[test]
+fn project_phase5_type_system() {
+    assert_fixture("phase5_type_system", "main.xl");
+}
+
+#[test]
+fn project_all_features_phase5() {
+    assert_fixture("all_features_phase5", "main.xl");
+}
+
+#[test]
 fn project_luau_passthrough() {
     assert_fixture("luau_passthrough", "main.luau");
 }

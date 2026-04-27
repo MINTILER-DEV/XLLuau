@@ -1,0 +1,48 @@
+type Comparable = number
+type User = {
+    id: number,
+    name: string,
+}
+
+type Result<T, E> =
+    { ok: true, value: T }
+    | { ok: false, error: E }
+
+type Config = {
+    readonly host: string,
+    port: number,
+    timeout: number?,
+}
+
+type PartialConfig = Partial<Config>
+type HostConfig = Pick<Config, "host" | "port">
+type Flags = Record<"debug" | "verbose", boolean>
+type Present = Exclude<"ok" | "err" | nil, nil>
+
+local function max<T extends Comparable>(a: T, b: T): T
+    return if a > b then a else b
+end
+
+local function makeEmpty<T>(): T
+    return nil :: any
+end
+
+local function fetch<T, Err = string>(url: string): Result<T, Err>
+    return nil :: any
+end
+
+local scoreA = 8
+local scoreB = 12
+local best = max(scoreA, scoreB)
+local empty = makeEmpty::<{ x: number, y: number }>()
+local user = fetch::<User>("/api/user")
+
+const DEFAULTS = freeze {
+    host = "localhost",
+    port = 80,
+    timeout = 30,
+}
+
+type Defaults = Readonly<typeof(DEFAULTS)>
+
+return best, empty, user, DEFAULTS

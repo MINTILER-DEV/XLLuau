@@ -1,6 +1,9 @@
 # Pattern Literals and Readonly Sugar
 
-Status: designed, not fully implemented in the current compiler
+Status: split status
+
+- Pattern literals: designed, not yet implemented
+- `readonly` and `freeze`: implemented in the current compiler
 
 This guide covers a few planned language features that are useful to know as part of the overall XLuau design.
 
@@ -43,15 +46,24 @@ readonly config: Config = {
 }
 ```
 
-Or explicit freeze helpers that lower into `table.freeze(...)` plus matching type information.
+Or explicit freeze helpers that lower into `table.freeze(...)` plus matching type information:
 
-### Intended Direction
+```lua
+const DEFAULTS = freeze {
+    retries = 3,
+    debug = false,
+}
+```
 
-The design tries to bring together:
+### Current Behavior
+
+The current compiler supports:
 
 - compile-time immutability intent
-- runtime freezing where needed
-- clearer declarations for shared constant data
+- `freeze { ... }` lowering to `table.freeze({ ... })`
+- utility-type expansion such as `Readonly<typeof(DEFAULTS)>`
+
+For compatibility with the Luau validator used in this repository, emitted type fields currently stay in ordinary `name: Type` form instead of using newer `read` field syntax.
 
 ## Why These Features Exist
 
@@ -65,4 +77,4 @@ more obvious in code.
 
 ## Practical Advice Today
 
-These features are part of the documented XLuau design but are not fully implemented in the current compiler yet.
+Use `freeze { ... }` when you want the runtime table frozen, and use `Readonly<T>` or readonly field declarations to make the source intent clear in XLuau code.

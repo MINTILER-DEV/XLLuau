@@ -1,0 +1,69 @@
+type Comparable = number
+type User = {
+    id: number,
+    name: string,
+}
+
+type Result<T, E = string> =
+    { ok: true, value: T }
+    | { ok: false, error: E }
+
+type Settings = {
+    readonly timeout: number,
+    retries: number,
+}
+
+enum Direction
+    North
+    South
+end
+
+local function wrap<T>(value: T): Result<T>
+    return {
+        ok = true,
+        value = value,
+    }
+end
+
+local function max<T extends Comparable>(a: T, b: T): T
+    return if a > b then a else b
+end
+
+const DEFAULTS = freeze {
+    timeout = 30,
+    retries = 2,
+}
+
+type FrozenSettings = Readonly<typeof(DEFAULTS)>
+type SettingFlags = Record<"fast" | "safe", boolean>
+
+local config = {}
+local { timeout = DEFAULTS.timeout, retries } = DEFAULTS
+local current = config.timeout ?? timeout
+local label = current > 20 ? "slow" : "fast"
+local doubled = { value * 2 for _, value in { 1, 2, 3, 4 } if value > 1 }
+local direction: Direction = Direction.North
+local winner = max(current, retries)
+local boxed = wrap::<number>(winner)
+local user = {
+    id = 7,
+    name = "Ada",
+}
+local greeting = user?.name ?? "Guest"
+local lowered = greeting |> :lower()
+
+switch direction
+    case Direction.North
+        print(label, lowered)
+    case Direction.South
+        print("south", doubled[1])
+end
+
+match boxed
+    { ok = true, value = value }
+        print(value)
+    { ok = false, error = message }
+        print(message)
+end
+
+return doubled, boxed, greeting

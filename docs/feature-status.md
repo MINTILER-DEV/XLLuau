@@ -25,6 +25,21 @@ These features are implemented and tested in the current Rust compiler:
 - `enum`
 - Table comprehensions
 - `do`-expressions
+- Generic constraints on functions
+- Explicit type arguments with `::<...>`
+- Default type parameters on functions
+- Built-in type utilities:
+  - `Partial`
+  - `Required`
+  - `Readonly`
+  - `Pick`
+  - `Omit`
+  - `Record`
+  - `Exclude`
+  - `ReturnType`
+  - `Parameters`
+- `freeze {}` sugar
+- `readonly` field lowering
 - Exhaustiveness checks for:
   - `switch` over literal unions and enums
   - `match` over discriminated unions
@@ -37,11 +52,7 @@ These are part of the language design and are documented here so people can lear
 - Task functions
 - Signals
 - Reactive state
-- Generic constraints and defaults
-- Explicit type arguments
 - Pattern literals
-- Type utility aliases
-- Readonly and freeze sugar
 - Source maps and line pragmas
 - LSP and editor tooling described in the spec
 

@@ -1,12 +1,12 @@
 # Type System Extensions
 
-Status: designed, not fully implemented in the current compiler
+Status: implemented for phase 5 in the current compiler
 
 XLuau's type-system additions are meant to extend Luau's type story without changing its overall feel.
 
 ## Generic Constraints
 
-### Intended Syntax
+### Syntax
 
 ```lua
 local function max<T extends Comparable>(a: T, b: T): T
@@ -14,7 +14,7 @@ local function max<T extends Comparable>(a: T, b: T): T
 end
 ```
 
-### Intended Lowering Strategy
+### Lowering Strategy
 
 The spec uses constraint erasure through intersections:
 
@@ -25,6 +25,8 @@ end
 ```
 
 That fits Luau's structural type model.
+
+In the current compiler, this lowering happens when XLuau syntax is used inside `.xl` files.
 
 ### Why Constraints Matter
 
@@ -38,7 +40,7 @@ They let APIs communicate expectations such as:
 
 ## Explicit Type Arguments
 
-### Intended Syntax
+### Syntax
 
 ```lua
 local binding = createBinding::<number?>(nil)
@@ -46,7 +48,7 @@ local binding = createBinding::<number?>(nil)
 
 The `::` before `<...>` avoids parser ambiguity with comparison operators.
 
-### Intended Emit Strategy
+### Emit Strategy
 
 The design uses two different lowering paths:
 
@@ -55,9 +57,14 @@ The design uses two different lowering paths:
 
 That keeps the feature aligned with Luau's existing type assertion model.
 
+If a call target has a known function signature, XLuau instantiates that signature with the provided type arguments and either:
+
+- casts the argument positions that carry the generic
+- or casts the function value itself when there is no parameter position to drive inference
+
 ## Default Type Parameters on Functions
 
-### Intended Syntax
+### Syntax
 
 ```lua
 local function fetch<T, Err = string>(url: string): Result<T, Err>
@@ -69,15 +76,21 @@ end
 
 Default generic parameters are especially useful when one type parameter is "the advanced one" and most callers should not need to spell it out.
 
+The current compiler fills trailing defaults when explicit type arguments are provided with fewer entries than the function declares.
+
 ## Type Utilities
 
-The spec also reserves a family of utility helpers such as:
+The current compiler supports a family of utility helpers such as:
 
 - `Partial<T>`
 - `Required<T>`
 - `Readonly<T>`
 - `Pick<T, K>`
 - `Omit<T, K>`
+- `Record<K, V>`
+- `Exclude<T, U>`
+- `ReturnType<typeof(fn)>`
+- `Parameters<typeof(fn)>`
 
 These are documented as language-level conveniences over common Luau type transforms.
 
@@ -96,4 +109,9 @@ The goal is not to build a completely separate type language. The goal is to mak
 
 ## Practical Advice Today
 
-The current compiler already passes through a wide range of ordinary Luau type syntax, but these XLuau-specific type extensions are still part of the planned language surface rather than the fully-implemented compiler surface.
+The current compiler now lowers the phase 5 type-system syntax in `.xl` files.
+
+Two practical notes:
+
+- utility-type expansion is strongest when it can see a concrete table shape or a known function signature
+- `readonly` lowers as compile-time intent today, while emitted Luau stays compatible with the validator used by this repository
