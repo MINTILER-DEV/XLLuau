@@ -1,0 +1,3 @@
+local math = require "@shared/math"
+
+return math

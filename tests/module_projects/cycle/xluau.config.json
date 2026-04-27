@@ -1,0 +1,8 @@
+{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "filesystem",
+  "paths": {
+    "@app": "./src"
+  }
+}

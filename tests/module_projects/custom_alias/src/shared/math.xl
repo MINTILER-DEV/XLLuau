@@ -1,0 +1,5 @@
+return {
+    triple = function(value)
+        return value * 3
+    end,
+}

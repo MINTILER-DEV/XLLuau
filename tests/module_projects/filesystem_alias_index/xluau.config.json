@@ -1,0 +1,9 @@
+{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "filesystem",
+  "paths": {
+    "@shared": "./src/shared",
+    "@shared/*": "./src/shared/*"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "include": ["src/**/*.xl"],
+  "baseDir": "src",
+  "target": "custom",
+  "customTargetFunction": "resolveModule",
+  "paths": {
+    "@shared": "./src/shared"
+  }
+}
