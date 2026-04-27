@@ -4,6 +4,7 @@ use std::{
 };
 
 use glob::glob;
+use luau_parser::parser::Parser as LuauParser;
 use thiserror::Error;
 
 use crate::{
@@ -47,6 +48,8 @@ pub enum CompilerError {
     Semantic { messages: Vec<String> },
     #[error("format error: {message}")]
     Format { message: String },
+    #[error("luau validation error: {message}")]
+    Validation { message: String },
     #[error("{0}")]
     Other(String),
 }
@@ -59,11 +62,16 @@ impl Compiler {
     }
 
     pub fn compile_source(&self, source: &str) -> Result<String> {
+        if self.validate_luau(source).is_ok() {
+            return format_luau(source);
+        }
+
         let tokens = Lexer::new(source).tokenize()?;
         let mut parser = Parser::new(source, tokens);
         let program = parser.parse_program()?;
         let mut emitter = Emitter::new();
         let raw = emitter.emit_program(&program)?;
+        self.validate_luau(&raw)?;
         format_luau(&raw)
     }
 
@@ -133,6 +141,23 @@ impl Compiler {
         let mut output = self.root.join(&self.config.out_dir).join(relative);
         output.set_extension("luau");
         Ok(output)
+    }
+
+    fn validate_luau(&self, source: &str) -> Result<()> {
+        let mut parser = LuauParser::new(source);
+        let cst = parser.parse("<memory>");
+        if cst.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CompilerError::Validation {
+                message: cst
+                    .errors
+                    .iter()
+                    .map(|error| format!("{error:?}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            })
+        }
     }
 }
 
@@ -218,5 +243,40 @@ end
         assert!(output.contains("for _for"));
         assert!(output.contains("local name ="));
         assert!(output.contains("local score ="));
+    }
+
+    #[test]
+    fn accepts_wide_luau_grammar_via_passthrough() {
+        let source = r##"
+local foo: { [string]: number, bar: (number, string) -> () } = { bar = function(_x, _y) end }
+foo.bar(1, "x")
+foo["a"] += 1
+local cast = foo :: any
+local label = if cast then `value: {cast}` else "none"
+export type Box<T = string> = { value: T }
+for key, value in foo do
+    if key then
+        continue
+    end
+end
+"##;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("foo[\"a\"] += 1"));
+        assert!(output.contains("foo :: any"));
+        assert!(output.contains("`value: {cast}`"));
+        assert!(output.contains("export type Box"));
+        assert!(output.contains("continue"));
+    }
+
+    #[test]
+    fn supports_mixed_xluau_with_luau_compound_and_type_assertion() {
+        let source = r#"
+local count = (value :: number) ?? 0
+stats.total += 1
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("(value :: number)"));
+        assert!(output.contains("stats.total = stats.total + 1"));
+        assert!(output.contains("if _lhs"));
     }
 }

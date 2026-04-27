@@ -88,6 +88,14 @@ pub enum Symbol {
     Ellipsis,
     Arrow,
     PipeGreater,
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
+    DoubleSlashEqual,
+    PercentEqual,
+    CaretEqual,
+    DoubleDotEqual,
     Question,
     DoubleQuestion,
     DoubleQuestionEqual,
@@ -319,6 +327,21 @@ impl<'src> Lexer<'src> {
                 TokenKind::Symbol(Symbol::DoubleQuestionEqual),
                 "??=".to_string(),
             ),
+            (Some('+'), Some('='), _) => (TokenKind::Symbol(Symbol::PlusEqual), "+=".to_string()),
+            (Some('-'), Some('='), _) => (TokenKind::Symbol(Symbol::MinusEqual), "-=".to_string()),
+            (Some('*'), Some('='), _) => (TokenKind::Symbol(Symbol::StarEqual), "*=".to_string()),
+            (Some('/'), Some('/'), Some('=')) => (
+                TokenKind::Symbol(Symbol::DoubleSlashEqual),
+                "//=".to_string(),
+            ),
+            (Some('/'), Some('='), _) => (TokenKind::Symbol(Symbol::SlashEqual), "/=".to_string()),
+            (Some('%'), Some('='), _) => {
+                (TokenKind::Symbol(Symbol::PercentEqual), "%=".to_string())
+            }
+            (Some('^'), Some('='), _) => (TokenKind::Symbol(Symbol::CaretEqual), "^=".to_string()),
+            (Some('.'), Some('.'), Some('=')) => {
+                (TokenKind::Symbol(Symbol::DoubleDotEqual), "..=".to_string())
+            }
             (Some('?'), Some('?'), _) => {
                 (TokenKind::Symbol(Symbol::DoubleQuestion), "??".to_string())
             }

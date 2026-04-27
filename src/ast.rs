@@ -10,18 +10,34 @@ pub enum Stmt {
     Local(LocalDecl),
     Function(FunctionDecl),
     Assignment(Assignment),
-    NullishAssignment { target: AssignTarget, value: Expr },
+    CompoundAssignment {
+        target: AssignTarget,
+        op: CompoundOp,
+        value: Expr,
+    },
+    NullishAssignment {
+        target: AssignTarget,
+        value: Expr,
+    },
     Call(Expr),
     Return(Vec<Expr>),
     If(IfStmt),
-    While { condition: Expr, block: Block },
-    Repeat { block: Block, condition: Expr },
+    While {
+        condition: Expr,
+        block: Block,
+    },
+    Repeat {
+        block: Block,
+        condition: Expr,
+    },
     ForNumeric(ForNumeric),
     ForGeneric(ForGeneric),
     Do(Block),
     Break,
     Continue,
-    TypeAlias { raw: String },
+    TypeAlias {
+        raw: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +160,10 @@ pub enum Expr {
         op: UnaryOp,
         expr: Box<Expr>,
     },
+    TypeAssertion {
+        expr: Box<Expr>,
+        annotation: String,
+    },
     Binary {
         left: Box<Expr>,
         op: BinaryOp,
@@ -205,6 +225,18 @@ pub enum BinaryOp {
     Modulo,
     Power,
     Nullish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    FloorDivide,
+    Modulo,
+    Power,
+    Concat,
 }
 
 #[derive(Debug, Clone)]

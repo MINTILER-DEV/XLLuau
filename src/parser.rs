@@ -359,6 +359,15 @@ impl<'src> Parser<'src> {
 
     fn parse_assignment_or_call_stmt(&mut self) -> Result<Stmt> {
         let expr = self.parse_prefix_chain()?;
+        if let Some(op) = self.current_compound_op() {
+            self.bump();
+            let value = self.parse_expr()?;
+            return Ok(Stmt::CompoundAssignment {
+                target: self.into_assign_target(expr)?,
+                op,
+                value,
+            });
+        }
         if self.match_symbol(Symbol::DoubleQuestionEqual) {
             let value = self.parse_expr()?;
             return Ok(Stmt::NullishAssignment {
@@ -473,6 +482,25 @@ impl<'src> Parser<'src> {
 
     fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr> {
         let mut left = self.parse_prefix_expr()?;
+
+        if self.match_symbol(Symbol::DoubleColon) {
+            let annotation = self.collect_type_annotation(&[
+                StopToken::Symbol(Symbol::Comma),
+                StopToken::Symbol(Symbol::RParen),
+                StopToken::Symbol(Symbol::RBracket),
+                StopToken::Symbol(Symbol::RBrace),
+                StopToken::Keyword(Keyword::Then),
+                StopToken::Keyword(Keyword::Do),
+                StopToken::Keyword(Keyword::Else),
+                StopToken::Keyword(Keyword::ElseIf),
+                StopToken::Keyword(Keyword::End),
+                StopToken::Keyword(Keyword::Until),
+            ])?;
+            left = Expr::TypeAssertion {
+                expr: Box::new(left),
+                annotation,
+            };
+        }
 
         loop {
             if self.match_symbol(Symbol::Question) {
@@ -915,6 +943,20 @@ impl<'src> Parser<'src> {
         }
     }
 
+    fn current_compound_op(&self) -> Option<CompoundOp> {
+        match self.current().kind {
+            TokenKind::Symbol(Symbol::PlusEqual) => Some(CompoundOp::Add),
+            TokenKind::Symbol(Symbol::MinusEqual) => Some(CompoundOp::Subtract),
+            TokenKind::Symbol(Symbol::StarEqual) => Some(CompoundOp::Multiply),
+            TokenKind::Symbol(Symbol::SlashEqual) => Some(CompoundOp::Divide),
+            TokenKind::Symbol(Symbol::DoubleSlashEqual) => Some(CompoundOp::FloorDivide),
+            TokenKind::Symbol(Symbol::PercentEqual) => Some(CompoundOp::Modulo),
+            TokenKind::Symbol(Symbol::CaretEqual) => Some(CompoundOp::Power),
+            TokenKind::Symbol(Symbol::DoubleDotEqual) => Some(CompoundOp::Concat),
+            _ => None,
+        }
+    }
+
     fn collect_type_annotation(&mut self, stops: &[StopToken]) -> Result<String> {
         let start = self.current().span.start;
         let mut depth_paren = 0usize;
@@ -1180,6 +1222,14 @@ fn symbol_text(symbol: Symbol) -> &'static str {
         Symbol::Ellipsis => "...",
         Symbol::Arrow => "->",
         Symbol::PipeGreater => "|>",
+        Symbol::PlusEqual => "+=",
+        Symbol::MinusEqual => "-=",
+        Symbol::StarEqual => "*=",
+        Symbol::SlashEqual => "/=",
+        Symbol::DoubleSlashEqual => "//=",
+        Symbol::PercentEqual => "%=",
+        Symbol::CaretEqual => "^=",
+        Symbol::DoubleDotEqual => "..=",
         Symbol::Question => "?",
         Symbol::DoubleQuestion => "??",
         Symbol::DoubleQuestionEqual => "??=",

@@ -62,6 +62,9 @@ impl Emitter {
             Stmt::Local(local) => self.emit_local(local, indent),
             Stmt::Function(function) => self.emit_function_stmt(function, indent),
             Stmt::Assignment(assignment) => self.emit_assignment(assignment, indent),
+            Stmt::CompoundAssignment { target, op, value } => {
+                self.emit_compound_assignment(target, *op, value, indent)
+            }
             Stmt::NullishAssignment { target, value } => {
                 self.emit_nullish_assignment(target, value, indent)
             }
@@ -353,6 +356,31 @@ impl Emitter {
         Ok(parts.join("\n"))
     }
 
+    fn emit_compound_assignment(
+        &mut self,
+        target: &AssignTarget,
+        op: CompoundOp,
+        value: &Expr,
+        indent: usize,
+    ) -> Result<String> {
+        self.check_const_target(target);
+        let mut parts = Vec::new();
+        let lowered_target = self.emit_assign_target(target, true)?;
+        self.push_setup(&mut parts, indent, lowered_target.setup);
+        let target_expr = lowered_target.expr.clone();
+        let lowered_value = self.emit_expr(value, None)?;
+        self.push_setup(&mut parts, indent, lowered_value.setup);
+        parts.push(self.indent(
+            indent,
+            &format!(
+                "{target_expr} = {target_expr} {} {}",
+                compound_token(op),
+                lowered_value.expr
+            ),
+        ));
+        Ok(parts.join("\n"))
+    }
+
     fn emit_return(&mut self, values: &[Expr], indent: usize) -> Result<String> {
         let mut parts = Vec::new();
         let mut emitted = Vec::new();
@@ -612,6 +640,14 @@ impl Emitter {
                 Ok(LoweredExpr {
                     setup: lowered.setup,
                     expr: format!("({token}{})", lowered.expr),
+                    reuse_safe: false,
+                })
+            }
+            Expr::TypeAssertion { expr, annotation } => {
+                let lowered = self.emit_expr(expr, placeholder)?;
+                Ok(LoweredExpr {
+                    setup: lowered.setup,
+                    expr: format!("({} :: {annotation})", lowered.expr),
                     reuse_safe: false,
                 })
             }
@@ -1168,6 +1204,7 @@ impl Emitter {
             Expr::Name(name) => name == "_",
             Expr::Paren(inner) => self.contains_placeholder(inner),
             Expr::Unary { expr, .. } => self.contains_placeholder(expr),
+            Expr::TypeAssertion { expr, .. } => self.contains_placeholder(expr),
             Expr::Binary { left, right, .. } => {
                 self.contains_placeholder(left) || self.contains_placeholder(right)
             }
@@ -1363,5 +1400,18 @@ fn binary_token(op: BinaryOp) -> &'static str {
         BinaryOp::Modulo => "%",
         BinaryOp::Power => "^",
         BinaryOp::Nullish => "??",
+    }
+}
+
+fn compound_token(op: CompoundOp) -> &'static str {
+    match op {
+        CompoundOp::Add => "+",
+        CompoundOp::Subtract => "-",
+        CompoundOp::Multiply => "*",
+        CompoundOp::Divide => "/",
+        CompoundOp::FloorDivide => "//",
+        CompoundOp::Modulo => "%",
+        CompoundOp::Power => "^",
+        CompoundOp::Concat => "..",
     }
 }
