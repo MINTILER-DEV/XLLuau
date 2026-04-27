@@ -539,7 +539,7 @@ impl Emitter {
             AssignTarget::Field { object, field } => {
                 let lowered_object = self.emit_expr(object, None)?;
                 let lowered_object = self.capture_if_needed(lowered_object, "obj");
-                let expr = if capture {
+                let expr = if capture && !lowered_object.setup.is_empty() {
                     let temp = self.next_temp("obj");
                     let mut setup = lowered_object.setup;
                     setup.push(format!("local {temp} = {}", lowered_object.expr));
@@ -562,14 +562,14 @@ impl Emitter {
                 let lowered_index = self.capture_if_needed(lowered_index, "idx");
                 let mut setup = lowered_object.setup;
                 setup.extend(lowered_index.setup);
-                let object_expr = if capture {
+                let object_expr = if capture && !setup.is_empty() {
                     let temp = self.next_temp("obj");
                     setup.push(format!("local {temp} = {}", lowered_object.expr));
                     temp
                 } else {
                     lowered_object.expr
                 };
-                let index_expr = if capture {
+                let index_expr = if capture && !setup.is_empty() {
                     let temp = self.next_temp("idx");
                     setup.push(format!("local {temp} = {}", lowered_index.expr));
                     temp

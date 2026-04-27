@@ -161,12 +161,14 @@ local label = isAdmin ? "admin" : "user"
         let source = r#"
 local words = str |> :lower() |> :split(" ")
 local hp = entity?.GetHealth()
+local first = list?.[1]
 "#;
         let output = compiler().compile_source(source).unwrap();
         assert!(output.contains(r#"local _pipe0 = str:lower()"#));
         assert!(output.contains(r#"_pipe0:split(" ")"#));
         assert!(output.contains("local _opt"));
         assert!(output.contains("GetHealth"));
+        assert!(output.contains("[1]"));
     }
 
     #[test]
@@ -190,5 +192,31 @@ PI = 4
 "#;
         let err = compiler().compile_source(source).unwrap_err();
         assert!(format!("{err}").contains("cannot assign to const"));
+    }
+
+    #[test]
+    fn lowers_nullish_assignment_pipe_placeholders_and_destructured_scopes() {
+        let source = r#"
+config.retries ??= getRetries()
+local result = numbers |> filter(_, isEven) |> map(_, double)
+
+function update({ x, y }: Point, [head, ...tail]: ArrayLike)
+    return x, y, head, tail
+end
+
+for { name, score } in players do
+    print(name, score)
+end
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("if config.retries == nil then"));
+        assert!(output.contains("config.retries = getRetries()"));
+        assert!(output.contains("filter(numbers, isEven)"));
+        assert!(output.contains("map("));
+        assert!(output.contains("function update(_param"));
+        assert!(output.contains("local head ="));
+        assert!(output.contains("for _for"));
+        assert!(output.contains("local name ="));
+        assert!(output.contains("local score ="));
     }
 }

@@ -713,6 +713,24 @@ impl<'src> Parser<'src> {
                 expr = self.push_segment(expr, ChainSegment::Call { args });
                 continue;
             }
+            if self.check_symbol(Symbol::Question)
+                && self.check_symbol_at(1, Symbol::Dot)
+                && self.check_symbol_at(2, Symbol::LBracket)
+            {
+                self.bump();
+                self.bump();
+                self.bump();
+                let index = self.parse_expr()?;
+                self.expect_symbol(Symbol::RBracket)?;
+                expr = self.push_segment(
+                    expr,
+                    ChainSegment::Index {
+                        expr: Box::new(index),
+                        safe: true,
+                    },
+                );
+                continue;
+            }
             if self.check_symbol(Symbol::Question) && self.check_symbol_at(1, Symbol::Dot) {
                 self.bump();
                 self.bump();
@@ -732,20 +750,6 @@ impl<'src> Parser<'src> {
                 }
                 continue;
             }
-            if self.check_symbol(Symbol::Question) && self.check_symbol_at(1, Symbol::LBracket) {
-                self.bump();
-                self.bump();
-                let index = self.parse_expr()?;
-                self.expect_symbol(Symbol::RBracket)?;
-                expr = self.push_segment(
-                    expr,
-                    ChainSegment::Index {
-                        expr: Box::new(index),
-                        safe: true,
-                    },
-                );
-                continue;
-            }
             break;
         }
         Ok(expr)
@@ -758,10 +762,8 @@ impl<'src> Parser<'src> {
             return Ok(PipeStage::Method { name, args });
         }
 
-        let callee = self.parse_prefix_chain()?;
-        if matches!(callee, Expr::Chain { .. } | Expr::Name(_) | Expr::Paren(_))
-            && self.check_call_start()
-        {
+        let callee = self.parse_pipe_callee()?;
+        if self.check_call_start() {
             let args = self.parse_args()?;
             Ok(PipeStage::Call {
                 callee: Box::new(callee),
@@ -772,6 +774,41 @@ impl<'src> Parser<'src> {
                 callee: Box::new(callee),
             })
         }
+    }
+
+    fn parse_pipe_callee(&mut self) -> Result<Expr> {
+        let mut expr = if self.match_symbol(Symbol::LParen) {
+            let inner = self.parse_expr()?;
+            self.expect_symbol(Symbol::RParen)?;
+            Expr::Paren(Box::new(inner))
+        } else if self.check(TokenKind::Identifier) {
+            Expr::Name(self.bump().lexeme)
+        } else {
+            return Err(self.error_here("expected pipe stage"));
+        };
+
+        loop {
+            if self.match_symbol(Symbol::Dot) {
+                let name = self.expect_identifier()?;
+                expr = self.push_segment(expr, ChainSegment::Field { name, safe: false });
+                continue;
+            }
+            if self.match_symbol(Symbol::LBracket) {
+                let index = self.parse_expr()?;
+                self.expect_symbol(Symbol::RBracket)?;
+                expr = self.push_segment(
+                    expr,
+                    ChainSegment::Index {
+                        expr: Box::new(index),
+                        safe: false,
+                    },
+                );
+                continue;
+            }
+            break;
+        }
+
+        Ok(expr)
     }
 
     fn parse_args(&mut self) -> Result<Vec<Expr>> {
