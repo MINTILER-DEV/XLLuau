@@ -8,12 +8,15 @@ use crate::{
 pub struct Emitter {
     temp_counter: usize,
     _luau_target: String,
+    spawn_uses_roblox: bool,
     const_scopes: Vec<HashSet<String>>,
     type_scopes: Vec<HashMap<String, String>>,
     function_scopes: Vec<HashMap<String, FunctionSignature>>,
     type_defs: HashMap<String, TypeShape>,
     type_alias_bodies: HashMap<String, String>,
     value_type_scopes: Vec<HashMap<String, String>>,
+    object_contexts: Vec<ObjectContext>,
+    task_depth: usize,
     errors: Vec<String>,
 }
 
@@ -63,21 +66,31 @@ struct FunctionSignature {
     return_type: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ObjectContext {
+    _class_name: String,
+    parent_name: Option<String>,
+    _in_constructor: bool,
+}
+
 impl Emitter {
     pub fn new() -> Self {
-        Self::with_luau_target("new-solver")
+        Self::with_options("new-solver", false)
     }
 
-    pub fn with_luau_target(luau_target: impl Into<String>) -> Self {
+    pub fn with_options(luau_target: impl Into<String>, spawn_uses_roblox: bool) -> Self {
         Self {
             temp_counter: 0,
             _luau_target: luau_target.into(),
+            spawn_uses_roblox,
             const_scopes: vec![HashSet::new()],
             type_scopes: vec![HashMap::new()],
             function_scopes: vec![HashMap::new()],
             type_defs: HashMap::new(),
             type_alias_bodies: HashMap::new(),
             value_type_scopes: vec![HashMap::new()],
+            object_contexts: Vec::new(),
+            task_depth: 0,
             errors: Vec::new(),
         }
     }
@@ -117,6 +130,7 @@ impl Emitter {
         match stmt {
             Stmt::Local(local) => self.emit_local(local, indent),
             Stmt::Function(function) => self.emit_function_stmt(function, indent),
+            Stmt::Object(object) => self.emit_object_decl(object, indent),
             Stmt::Enum(decl) => {
                 self.register_enum_type(decl);
                 self.emit_enum_decl(decl, indent)
@@ -161,6 +175,7 @@ impl Emitter {
                 );
                 Ok(String::new())
             }
+            Stmt::Spawn(spawn) => self.emit_spawn_stmt(spawn, indent),
             Stmt::TypeAlias { raw } => {
                 let rewritten = self.rewrite_type_alias(raw);
                 self.register_type_alias(&rewritten);
@@ -330,6 +345,9 @@ impl Emitter {
     }
 
     fn emit_function_stmt(&mut self, function: &FunctionDecl, indent: usize) -> Result<String> {
+        if function.is_task {
+            return self.emit_task_function_stmt(function, indent);
+        }
         let header = if function.local_name {
             format!("local function {}", function.name.root)
         } else {
@@ -389,6 +407,304 @@ impl Emitter {
         }
         parts.push(self.indent(indent, "end"));
         Ok(parts.join("\n"))
+    }
+
+    fn emit_task_function_stmt(&mut self, function: &FunctionDecl, indent: usize) -> Result<String> {
+        let generic_specs = self.parse_generic_params(function.generics.as_deref());
+        let emitted_generics = self.render_generic_params(&generic_specs);
+        let (params, prologue) = self.lower_params(&function.params, &generic_specs)?;
+        self.declare_name(&function.name.root, false);
+
+        self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
+        for name in self.collect_param_names(&function.params) {
+            self.declare_name(&name, false);
+        }
+        self.declare_param_types(&function.params);
+
+        self.task_depth += 1;
+        let body = self.emit_block(&function.body, indent + 2)?;
+        self.task_depth = self.task_depth.saturating_sub(1);
+
+        self.const_scopes.pop();
+        self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
+
+        let signature = format!(
+            "local function {}{emitted_generics}({}): thread",
+            function.name.root,
+            params.join(", ")
+        );
+        let mut parts = vec![self.indent(indent, &signature)];
+        for line in prologue {
+            parts.push(self.indent(indent + 1, &line));
+        }
+        parts.push(self.indent(indent + 1, "return coroutine.create(function()"));
+        if !body.is_empty() {
+            parts.push(body);
+        }
+        parts.push(self.indent(indent + 1, "end)"));
+        parts.push(self.indent(indent, "end"));
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_object_decl(&mut self, object: &ObjectDecl, indent: usize) -> Result<String> {
+        let instance_type = self.render_object_instance_type(object);
+        let mut parts = vec![self.indent(indent, &instance_type)];
+        parts.push(self.indent(indent, &format!("local {} = {{}}", object.name)));
+        parts.push(self.indent(indent, &format!("{}.__index = {}", object.name, object.name)));
+        if let Some(parent) = &object.extends {
+            parts.push(self.indent(
+                indent,
+                &format!("setmetatable({}, {{ __index = {} }})", object.name, parent),
+            ));
+        }
+
+        for method in &object.methods {
+            let emitted = self.emit_object_method(object, method, indent)?;
+            if !emitted.is_empty() {
+                parts.push(emitted);
+            }
+        }
+
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_object_method(
+        &mut self,
+        object: &ObjectDecl,
+        method: &ObjectMethod,
+        indent: usize,
+    ) -> Result<String> {
+        if method.name == "new" && !method.is_static {
+            return self.emit_object_constructor(object, method, indent);
+        }
+
+        let generic_specs = self.parse_generic_params(method.generics.as_deref());
+        let emitted_generics = self.render_generic_params(&generic_specs);
+        let (params, prologue) = self.lower_params(&method.params, &generic_specs)?;
+        let return_type = method
+            .return_type
+            .as_ref()
+            .map(|text| format!(": {}", self.rewrite_type_text(text)))
+            .unwrap_or_default();
+        let header = if method.is_static {
+            format!(
+                "function {}.{}{emitted_generics}({}){return_type}",
+                object.name,
+                method.name,
+                params.join(", ")
+            )
+        } else {
+            format!(
+                "function {}:{}{emitted_generics}({}){return_type}",
+                object.name,
+                method.name,
+                params.join(", ")
+            )
+        };
+
+        self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
+        for name in self.collect_param_names(&method.params) {
+            self.declare_name(&name, false);
+        }
+        self.declare_param_types(&method.params);
+        self.object_contexts.push(ObjectContext {
+            _class_name: object.name.clone(),
+            parent_name: object.extends.clone(),
+            _in_constructor: false,
+        });
+        let body = self.emit_block(&method.body, indent + 1)?;
+        self.object_contexts.pop();
+        self.const_scopes.pop();
+        self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
+
+        let mut parts = vec![self.indent(indent, &header)];
+        for line in prologue {
+            parts.push(self.indent(indent + 1, &line));
+        }
+        if !body.is_empty() {
+            parts.push(body);
+        }
+        parts.push(self.indent(indent, "end"));
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_object_constructor(
+        &mut self,
+        object: &ObjectDecl,
+        method: &ObjectMethod,
+        indent: usize,
+    ) -> Result<String> {
+        let generic_specs = self.parse_generic_params(method.generics.as_deref());
+        let emitted_generics = self.render_generic_params(&generic_specs);
+        let (params, prologue) = self.lower_params(&method.params, &generic_specs)?;
+        let return_type = method
+            .return_type
+            .as_ref()
+            .map(|text| self.rewrite_type_text(text))
+            .unwrap_or_else(|| object.name.clone());
+        let header = format!(
+            "function {}.new{emitted_generics}({}): {}",
+            object.name,
+            params.join(", "),
+            return_type
+        );
+
+        let mut body_slice = method.body.as_slice();
+        let mut init_lines = Vec::new();
+        if let Some(parent) = &object.extends {
+            if let Some(args) = body_slice.first().and_then(|stmt| self.extract_super_constructor_args(stmt)) {
+                let (setup, values) = self.emit_args(&args, None)?;
+                init_lines.extend(setup);
+                init_lines.push(format!(
+                    "local self = {}.new({}) :: {}",
+                    parent,
+                    values.join(", "),
+                    object.name
+                ));
+                init_lines.push(format!("setmetatable(self, {})", object.name));
+                body_slice = &body_slice[1..];
+            } else {
+                init_lines.push(format!(
+                    "local self = setmetatable({{}} :: {}, {})",
+                    object.name, object.name
+                ));
+            }
+        } else {
+            init_lines.push(format!(
+                "local self = setmetatable({{}} :: {}, {})",
+                object.name, object.name
+            ));
+        }
+
+        self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
+        for name in self.collect_param_names(&method.params) {
+            self.declare_name(&name, false);
+        }
+        self.declare_param_types(&method.params);
+        self.object_contexts.push(ObjectContext {
+            _class_name: object.name.clone(),
+            parent_name: object.extends.clone(),
+            _in_constructor: true,
+        });
+        let body = self.emit_block(&body_slice.to_vec(), indent + 1)?;
+        self.object_contexts.pop();
+        self.const_scopes.pop();
+        self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
+
+        let mut parts = vec![self.indent(indent, &header)];
+        for line in prologue {
+            parts.push(self.indent(indent + 1, &line));
+        }
+        for line in init_lines {
+            self.push_multiline(&mut parts, indent + 1, &line);
+        }
+        if !body.is_empty() {
+            parts.push(body);
+        }
+        if !matches!(body_slice.last(), Some(Stmt::Return(_))) {
+            parts.push(self.indent(indent + 1, "return self"));
+        }
+        parts.push(self.indent(indent, "end"));
+        Ok(parts.join("\n"))
+    }
+
+    fn render_object_instance_type(&self, object: &ObjectDecl) -> String {
+        let mut entries = Vec::new();
+        for field in &object.fields {
+            entries.push(format!(
+                "{}: {}",
+                field.name,
+                self.rewrite_type_text(&field.annotation)
+            ));
+        }
+        for method in &object.methods {
+            if method.is_static || method.name == "new" {
+                continue;
+            }
+            entries.push(format!(
+                "{}: {}",
+                method.name,
+                self.render_object_method_type(object, method)
+            ));
+        }
+
+        let body = format!("{{ {} }}", entries.join(", "));
+        if let Some(parent) = &object.extends {
+            format!("type {} = {} & {}", object.name, parent, body)
+        } else {
+            format!("type {} = {}", object.name, body)
+        }
+    }
+
+    fn render_object_method_type(&self, object: &ObjectDecl, method: &ObjectMethod) -> String {
+        let generics = self
+            .parse_generic_params(method.generics.as_deref())
+            .into_iter()
+            .map(|generic| generic.name)
+            .collect::<Vec<_>>();
+        let mut params = vec![object.name.clone()];
+        for param in &method.params {
+            match param {
+                Param::Binding(binding) => params.push(
+                    binding
+                        .type_annotation
+                        .as_ref()
+                        .map(|text| self.rewrite_type_text(text))
+                        .unwrap_or_else(|| "any".to_string()),
+                ),
+                Param::VarArg(annotation) => params.push(format!(
+                    "...{}",
+                    annotation
+                        .as_ref()
+                        .map(|text| self.rewrite_type_text(text))
+                        .unwrap_or_else(|| "any".to_string())
+                )),
+            }
+        }
+        let return_type = method
+            .return_type
+            .as_ref()
+            .map(|text| self.rewrite_type_text(text))
+            .unwrap_or_else(|| "()".to_string());
+        if generics.is_empty() {
+            format!("({}) -> {}", params.join(", "), return_type)
+        } else {
+            format!("<{}>({}) -> {}", generics.join(", "), params.join(", "), return_type)
+        }
+    }
+
+    fn extract_super_constructor_args(&self, stmt: &Stmt) -> Option<Vec<Expr>> {
+        let Stmt::Call(Expr::Chain { base, segments }) = stmt else {
+            return None;
+        };
+        if !matches!(&**base, Expr::Name(name) if name == "super") {
+            return None;
+        }
+        if segments.len() != 2 {
+            return None;
+        }
+        match (&segments[0], &segments[1]) {
+            (
+                ChainSegment::Field { name, safe: false },
+                ChainSegment::Call { args, .. },
+            ) if name == "new" => Some(args.clone()),
+            _ => None,
+        }
     }
 
     fn emit_enum_decl(&mut self, decl: &EnumDecl, indent: usize) -> Result<String> {
@@ -528,6 +844,94 @@ impl Emitter {
             parts.push(self.indent(indent, &format!("return {}", emitted.join(", "))));
         }
         Ok(parts.join("\n"))
+    }
+
+    fn emit_spawn_stmt(&mut self, spawn: &SpawnStmt, indent: usize) -> Result<String> {
+        let lowered_call = self.emit_expr(&spawn.call, None)?;
+        let co_name = self.next_temp("co");
+        let ok_name = self.next_temp("ok");
+        let result_name = self.next_temp("result");
+        let mut inner = Vec::new();
+        self.push_setup(&mut inner, 0, lowered_call.setup);
+        inner.push(format!("local {co_name} = {}", lowered_call.expr));
+        inner.push(format!(
+            "local {ok_name}, {result_name} = coroutine.resume({co_name})"
+        ));
+        inner.push(format!(
+            "while {ok_name} and coroutine.status({co_name}) ~= \"dead\" do"
+        ));
+        inner.push(self.indent(
+            1,
+            &format!(
+                "{ok_name}, {result_name} = coroutine.resume({co_name}, {result_name})"
+            ),
+        ));
+        inner.push("end".to_string());
+
+        if spawn.then_handler.is_some() || spawn.catch_handler.is_some() {
+            inner.push(format!("if {ok_name} then"));
+            if let Some(handler) = &spawn.then_handler {
+                self.emit_spawn_handler_body(&mut inner, handler, &result_name, true)?;
+            }
+            inner.push("else".to_string());
+            if let Some(handler) = &spawn.catch_handler {
+                self.emit_spawn_handler_body(&mut inner, handler, &result_name, false)?;
+            }
+            inner.push("end".to_string());
+        }
+
+        if self.spawn_uses_roblox {
+            let mut parts = vec![self.indent(indent, "task.spawn(function()")];
+            for line in inner {
+                self.push_multiline(&mut parts, indent + 1, &line);
+            }
+            parts.push(self.indent(indent, "end)"));
+            Ok(parts.join("\n"))
+        } else {
+            Ok(inner
+                .into_iter()
+                .flat_map(|line| {
+                    let mut lines = Vec::new();
+                    if line.is_empty() {
+                        lines.push(String::new());
+                    } else {
+                        lines.push(self.indent(indent, &line));
+                    }
+                    lines
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+    }
+
+    fn emit_spawn_handler_body(
+        &mut self,
+        lines: &mut Vec<String>,
+        handler: &SpawnHandler,
+        source_name: &str,
+        success: bool,
+    ) -> Result<()> {
+        self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
+        for param in &handler.params {
+            self.declare_name(param, false);
+        }
+        if let Some(first) = handler.params.first() {
+            lines.push(self.indent(1, &format!("local {first} = {source_name}")));
+        } else if !success {
+            lines.push(self.indent(1, &format!("local _ = {source_name}")));
+        }
+        let body = self.emit_block(&handler.block, 1)?;
+        self.const_scopes.pop();
+        self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
+        if !body.is_empty() {
+            lines.extend(body.lines().map(ToString::to_string));
+        }
+        Ok(())
     }
 
     fn emit_if_stmt(&mut self, if_stmt: &IfStmt, indent: usize) -> Result<String> {
@@ -1066,6 +1470,19 @@ impl Emitter {
             Expr::Name(name) if placeholder.is_some() && name == "_" => {
                 Ok(self.simple_expr(placeholder.unwrap(), true))
             }
+            Expr::Name(name) if name == "super" => {
+                if let Some(parent) = self
+                    .object_contexts
+                    .last()
+                    .and_then(|context| context.parent_name.clone())
+                {
+                    Ok(self.simple_expr(parent, true))
+                } else {
+                    self.errors
+                        .push("`super` is only valid inside an object that extends another object".to_string());
+                    Ok(self.simple_expr("super", true))
+                }
+            }
             Expr::Name(name) => Ok(self.simple_expr(name, true)),
             Expr::Paren(inner) => {
                 let lowered = self.emit_expr(inner, placeholder)?;
@@ -1097,6 +1514,7 @@ impl Emitter {
                 })
             }
             Expr::Freeze(expr) => self.emit_freeze_expr(expr, placeholder),
+            Expr::Yield(expr) => self.emit_yield_expr(expr, placeholder),
             Expr::Binary { left, op, right } => {
                 self.emit_binary_expr(left, *op, right, placeholder)
             }
@@ -1465,6 +1883,11 @@ impl Emitter {
         segments: &[ChainSegment],
         placeholder: Option<&str>,
     ) -> Result<LoweredExpr> {
+        if let Expr::Name(name) = base
+            && name == "super"
+        {
+            return self.emit_super_chain_expr(segments, placeholder);
+        }
         let has_safe = segments.iter().any(|segment| match segment {
             ChainSegment::Field { safe, .. }
             | ChainSegment::Index { safe, .. }
@@ -1513,6 +1936,67 @@ impl Emitter {
         }
         Ok(LoweredExpr {
             setup: lowered.setup,
+            expr,
+            reuse_safe: false,
+        })
+    }
+
+    fn emit_super_chain_expr(
+        &mut self,
+        segments: &[ChainSegment],
+        placeholder: Option<&str>,
+    ) -> Result<LoweredExpr> {
+        let Some(parent) = self
+            .object_contexts
+            .last()
+            .and_then(|context| context.parent_name.clone())
+        else {
+            self.errors
+                .push("`super` is only valid inside an object that extends another object".to_string());
+            return Ok(self.simple_expr("super", true));
+        };
+
+        let mut setup = Vec::new();
+        let mut expr = parent;
+        for segment in segments {
+            match segment {
+                ChainSegment::Field { name, .. } => {
+                    expr = format!("{expr}.{name}");
+                }
+                ChainSegment::Index { expr: index, .. } => {
+                    let lowered = self.emit_expr(index, placeholder)?;
+                    setup.extend(lowered.setup);
+                    expr = format!("{expr}[{}]", lowered.expr);
+                }
+                ChainSegment::Call { type_args, args } => {
+                    let lowered = self.emit_explicit_type_call(
+                        &expr,
+                        type_args.as_deref(),
+                        args,
+                        placeholder,
+                    )?;
+                    setup.extend(lowered.setup);
+                    expr = lowered.expr;
+                }
+                ChainSegment::MethodCall {
+                    name,
+                    type_args,
+                    args,
+                    ..
+                } => {
+                    let lowered = self.emit_explicit_type_call(
+                        &format!("{expr}:{name}"),
+                        type_args.as_deref(),
+                        args,
+                        placeholder,
+                    )?;
+                    setup.extend(lowered.setup);
+                    expr = lowered.expr;
+                }
+            }
+        }
+        Ok(LoweredExpr {
+            setup,
             expr,
             reuse_safe: false,
         })
@@ -1722,6 +2206,23 @@ impl Emitter {
         Ok(LoweredExpr {
             setup: lowered.setup,
             expr: format!("table.freeze({})", lowered.expr),
+            reuse_safe: false,
+        })
+    }
+
+    fn emit_yield_expr(
+        &mut self,
+        expr: &Expr,
+        placeholder: Option<&str>,
+    ) -> Result<LoweredExpr> {
+        if self.task_depth == 0 {
+            self.errors
+                .push("`yield` is only valid inside a task function".to_string());
+        }
+        let lowered = self.emit_expr(expr, placeholder)?;
+        Ok(LoweredExpr {
+            setup: lowered.setup,
+            expr: format!("coroutine.yield({})", lowered.expr),
             reuse_safe: false,
         })
     }
@@ -2786,6 +3287,7 @@ impl Emitter {
             }
             Expr::DoExpr { result, .. } => self.contains_placeholder(result),
             Expr::Freeze(inner) => self.contains_placeholder(inner),
+            Expr::Yield(inner) => self.contains_placeholder(inner),
             Expr::SwitchExpr {
                 value,
                 cases,

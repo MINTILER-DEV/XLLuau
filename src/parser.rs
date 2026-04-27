@@ -39,7 +39,7 @@ impl<'src> Parser<'src> {
     fn parse_stmt(&mut self) -> Result<Stmt> {
         if self.match_keyword(Keyword::Local) {
             if self.match_keyword(Keyword::Function) {
-                return self.parse_function_stmt(true);
+                return self.parse_function_stmt(true, false);
             }
             return self.parse_local_decl(false);
         }
@@ -47,7 +47,14 @@ impl<'src> Parser<'src> {
             return self.parse_local_decl(true);
         }
         if self.match_keyword(Keyword::Function) {
-            return self.parse_function_stmt(false);
+            return self.parse_function_stmt(false, false);
+        }
+        if self.match_keyword(Keyword::Task) {
+            self.expect_keyword(Keyword::Function)?;
+            return self.parse_function_stmt(true, true);
+        }
+        if self.match_keyword(Keyword::Object) {
+            return self.parse_object_stmt();
         }
         if self.match_keyword(Keyword::Enum) {
             return self.parse_enum_stmt();
@@ -91,6 +98,13 @@ impl<'src> Parser<'src> {
         }
         if self.match_keyword(Keyword::Fallthrough) {
             return Ok(Stmt::Fallthrough);
+        }
+        if self.match_keyword(Keyword::Yield) {
+            let expr = self.parse_expr()?;
+            return Ok(Stmt::Call(Expr::Yield(Box::new(expr))));
+        }
+        if self.match_keyword(Keyword::Spawn) {
+            return self.parse_spawn_stmt();
         }
         if self.check_keyword(Keyword::Type)
             || (self.check_keyword(Keyword::Export) && self.check_keyword_at(1, Keyword::Type))
@@ -209,7 +223,7 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    fn parse_function_stmt(&mut self, local_name: bool) -> Result<Stmt> {
+    fn parse_function_stmt(&mut self, local_name: bool, is_task: bool) -> Result<Stmt> {
         let name = if local_name {
             let root = self.expect_identifier()?;
             FunctionName {
@@ -230,12 +244,159 @@ impl<'src> Parser<'src> {
 
         Ok(Stmt::Function(FunctionDecl {
             local_name,
+            is_task,
             name,
             generics,
             params,
             return_type,
             body,
         }))
+    }
+
+    fn parse_object_stmt(&mut self) -> Result<Stmt> {
+        let name = self.expect_identifier()?;
+        let extends = if self.match_keyword(Keyword::Extends) {
+            Some(self.expect_identifier()?)
+        } else {
+            None
+        };
+
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        while !self.check_keyword(Keyword::End) && !self.is_eof() {
+            if self.match_symbol(Symbol::Semi) {
+                continue;
+            }
+            if self.match_keyword(Keyword::Function) {
+                methods.push(self.parse_object_method()?);
+                continue;
+            }
+
+            let field_name = self.expect_identifier()?;
+            self.expect_symbol(Symbol::Colon)?;
+            let annotation = self.collect_object_field_annotation()?;
+            fields.push(ObjectField {
+                name: field_name,
+                annotation,
+            });
+        }
+
+        self.expect_keyword(Keyword::End)?;
+        Ok(Stmt::Object(ObjectDecl {
+            name,
+            extends,
+            fields,
+            methods,
+        }))
+    }
+
+    fn parse_object_method(&mut self) -> Result<ObjectMethod> {
+        let is_static = if self.check_identifier_named("static") {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        let name = self.expect_identifier()?;
+        let generics = if self.check_symbol(Symbol::Less) {
+            Some(self.collect_balanced(Symbol::Less, Symbol::Greater)?)
+        } else {
+            None
+        };
+        let (params, return_type, body) = self.parse_function_body()?;
+        Ok(ObjectMethod {
+            name,
+            is_static,
+            generics,
+            params,
+            return_type,
+            body,
+        })
+    }
+
+    fn parse_spawn_stmt(&mut self) -> Result<Stmt> {
+        let call = self.parse_prefix_chain()?;
+        if !self.is_call_statement_expr(&call) {
+            return Err(self.error_here("spawn expects a function or method call"));
+        }
+
+        let then_handler = if self.match_keyword(Keyword::Then) {
+            Some(self.parse_spawn_handler(&[Keyword::Catch, Keyword::End])?)
+        } else {
+            None
+        };
+        let catch_handler = if self.match_keyword(Keyword::Catch) {
+            Some(self.parse_spawn_handler(&[Keyword::End])?)
+        } else {
+            None
+        };
+
+        if then_handler.is_some() || catch_handler.is_some() {
+            self.expect_keyword(Keyword::End)?;
+        }
+
+        Ok(Stmt::Spawn(SpawnStmt {
+            call,
+            then_handler,
+            catch_handler,
+        }))
+    }
+
+    fn parse_spawn_handler(&mut self, terminators: &[Keyword]) -> Result<SpawnHandler> {
+        self.expect_symbol(Symbol::Pipe)?;
+        let mut params = Vec::new();
+        if !self.check_symbol(Symbol::Pipe) {
+            loop {
+                params.push(self.expect_identifier()?);
+                if !self.match_symbol(Symbol::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect_symbol(Symbol::Pipe)?;
+        let block = self.parse_block(terminators)?;
+        Ok(SpawnHandler { params, block })
+    }
+
+    fn collect_object_field_annotation(&mut self) -> Result<String> {
+        let start = self.current().span.start;
+        let start_line = self.current().span.line;
+        let mut depth_paren = 0usize;
+        let mut depth_brace = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut depth_angle = 0usize;
+
+        while !self.is_eof() {
+            if depth_paren == 0
+                && depth_brace == 0
+                && depth_bracket == 0
+                && depth_angle == 0
+                && self.current().span.line > start_line
+                && (self.looks_like_statement_start()
+                    || (self.check(TokenKind::Identifier)
+                        && self.check_symbol_at(1, Symbol::Colon)))
+            {
+                break;
+            }
+
+            match self.current().kind {
+                TokenKind::Symbol(Symbol::LParen) => depth_paren += 1,
+                TokenKind::Symbol(Symbol::RParen) => depth_paren = depth_paren.saturating_sub(1),
+                TokenKind::Symbol(Symbol::LBrace) => depth_brace += 1,
+                TokenKind::Symbol(Symbol::RBrace) => depth_brace = depth_brace.saturating_sub(1),
+                TokenKind::Symbol(Symbol::LBracket) => depth_bracket += 1,
+                TokenKind::Symbol(Symbol::RBracket) => {
+                    depth_bracket = depth_bracket.saturating_sub(1)
+                }
+                TokenKind::Symbol(Symbol::Less) => depth_angle += 1,
+                TokenKind::Symbol(Symbol::Greater) => depth_angle = depth_angle.saturating_sub(1),
+                _ => {}
+            }
+            self.bump();
+        }
+
+        let end = self.previous().span.end;
+        Ok(self.source[start..end].trim().to_string())
     }
 
     fn parse_function_name(&mut self) -> Result<FunctionName> {
@@ -260,13 +421,51 @@ impl<'src> Parser<'src> {
         let params = self.parse_params()?;
         self.expect_symbol(Symbol::RParen)?;
         let return_type = if self.match_symbol(Symbol::Colon) {
-            Some(self.collect_type_annotation(&[])?)
+            Some(self.collect_return_type_annotation()?)
         } else {
             None
         };
         let body = self.parse_block(&[Keyword::End])?;
         self.expect_keyword(Keyword::End)?;
         Ok((params, return_type, body))
+    }
+
+    fn collect_return_type_annotation(&mut self) -> Result<String> {
+        let start = self.current().span.start;
+        let start_line = self.current().span.line;
+        let mut depth_paren = 0usize;
+        let mut depth_brace = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut depth_angle = 0usize;
+
+        while !self.is_eof() {
+            if depth_paren == 0
+                && depth_brace == 0
+                && depth_bracket == 0
+                && depth_angle == 0
+                && self.current().span.line > start_line
+            {
+                break;
+            }
+
+            match self.current().kind {
+                TokenKind::Symbol(Symbol::LParen) => depth_paren += 1,
+                TokenKind::Symbol(Symbol::RParen) => depth_paren = depth_paren.saturating_sub(1),
+                TokenKind::Symbol(Symbol::LBrace) => depth_brace += 1,
+                TokenKind::Symbol(Symbol::RBrace) => depth_brace = depth_brace.saturating_sub(1),
+                TokenKind::Symbol(Symbol::LBracket) => depth_bracket += 1,
+                TokenKind::Symbol(Symbol::RBracket) => {
+                    depth_bracket = depth_bracket.saturating_sub(1)
+                }
+                TokenKind::Symbol(Symbol::Less) => depth_angle += 1,
+                TokenKind::Symbol(Symbol::Greater) => depth_angle = depth_angle.saturating_sub(1),
+                _ => {}
+            }
+            self.bump();
+        }
+
+        let end = self.previous().span.end;
+        Ok(self.source[start..end].trim().to_string())
     }
 
     fn parse_params(&mut self) -> Result<Vec<Param>> {
@@ -760,6 +959,9 @@ impl<'src> Parser<'src> {
         }
         if self.match_keyword(Keyword::Function) {
             return self.parse_function_expr();
+        }
+        if self.match_keyword(Keyword::Yield) {
+            return Ok(Expr::Yield(Box::new(self.parse_expr_bp(10)?)));
         }
         if self.check_identifier_named("freeze") && self.check_symbol_at(1, Symbol::LBrace) {
             self.bump();
@@ -1503,6 +1705,8 @@ impl<'src> Parser<'src> {
             TokenKind::Keyword(Keyword::Local)
                 | TokenKind::Keyword(Keyword::Const)
                 | TokenKind::Keyword(Keyword::Function)
+                | TokenKind::Keyword(Keyword::Task)
+                | TokenKind::Keyword(Keyword::Object)
                 | TokenKind::Keyword(Keyword::Enum)
                 | TokenKind::Keyword(Keyword::If)
                 | TokenKind::Keyword(Keyword::Switch)
@@ -1514,10 +1718,12 @@ impl<'src> Parser<'src> {
                 | TokenKind::Keyword(Keyword::Break)
                 | TokenKind::Keyword(Keyword::Continue)
                 | TokenKind::Keyword(Keyword::Fallthrough)
+                | TokenKind::Keyword(Keyword::Spawn)
                 | TokenKind::Keyword(Keyword::Do)
                 | TokenKind::Keyword(Keyword::Type)
                 | TokenKind::Keyword(Keyword::Export)
                 | TokenKind::Keyword(Keyword::Case)
+                | TokenKind::Keyword(Keyword::Catch)
                 | TokenKind::Keyword(Keyword::Default)
                 | TokenKind::Keyword(Keyword::End)
                 | TokenKind::Keyword(Keyword::Else)

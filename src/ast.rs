@@ -9,6 +9,7 @@ pub type Block = Vec<Stmt>;
 pub enum Stmt {
     Local(LocalDecl),
     Function(FunctionDecl),
+    Object(ObjectDecl),
     Enum(EnumDecl),
     Assignment(Assignment),
     CompoundAssignment {
@@ -39,9 +40,47 @@ pub enum Stmt {
     Break,
     Continue,
     Fallthrough,
+    Spawn(SpawnStmt),
     TypeAlias {
         raw: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectDecl {
+    pub name: String,
+    pub extends: Option<String>,
+    pub fields: Vec<ObjectField>,
+    pub methods: Vec<ObjectMethod>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectField {
+    pub name: String,
+    pub annotation: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectMethod {
+    pub name: String,
+    pub is_static: bool,
+    pub generics: Option<String>,
+    pub params: Vec<Param>,
+    pub return_type: Option<String>,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnStmt {
+    pub call: Expr,
+    pub then_handler: Option<SpawnHandler>,
+    pub catch_handler: Option<SpawnHandler>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnHandler {
+    pub params: Vec<String>,
+    pub block: Block,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +155,7 @@ pub enum AssignTarget {
 #[derive(Debug, Clone)]
 pub struct FunctionDecl {
     pub local_name: bool,
+    pub is_task: bool,
     pub name: FunctionName,
     pub generics: Option<String>,
     pub params: Vec<Param>,
@@ -209,6 +249,7 @@ pub enum Expr {
     Table(Vec<TableField>),
     Function(FunctionExpr),
     Freeze(Box<Expr>),
+    Yield(Box<Expr>),
     IfElse {
         branches: Vec<(Expr, Expr)>,
         else_expr: Box<Expr>,

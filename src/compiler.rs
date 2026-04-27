@@ -11,7 +11,7 @@ use crate::{
     config::XluauConfig,
     emitter::Emitter,
     formatter::format_luau,
-    lexer::Lexer,
+    lexer::{Keyword, Lexer, Symbol, Token},
     module::{ModuleResolver, detect_circular_dependencies},
     parser::Parser,
 };
@@ -191,14 +191,22 @@ impl Compiler {
     fn compile_source_with_path(&self, source: &str, path: &Path) -> Result<String> {
         let resolver = self.module_resolver();
         let rewritten_source = resolver.rewrite_requires(source, path)?;
-        if self.validate_luau(&rewritten_source).is_ok() {
+        let should_force_xluau = Lexer::new(source)
+            .tokenize()
+            .ok()
+            .map(|tokens| self.contains_xluau_tokens(&tokens))
+            .unwrap_or(false);
+        if !should_force_xluau && self.validate_luau(&rewritten_source).is_ok() {
             return format_luau(&rewritten_source);
         }
 
         let tokens = Lexer::new(source).tokenize()?;
         let mut parser = Parser::new(source, tokens);
         let program = parser.parse_program()?;
-        let mut emitter = Emitter::with_luau_target(self.config.luau_target.clone());
+        let mut emitter = Emitter::with_options(
+            self.config.luau_target.clone(),
+            self.config.task_adapter == "roblox" || self.config.target == "roblox",
+        );
         let raw = emitter.emit_program(&program)?;
         let rewritten_output = resolver.rewrite_requires(&raw, path)?;
         self.validate_luau(&rewritten_output)?;
@@ -211,6 +219,32 @@ impl Compiler {
 
     fn check_cycles(&self, entry_points: &[PathBuf]) -> Result<()> {
         detect_circular_dependencies(&self.module_resolver(), entry_points)
+    }
+
+    fn contains_xluau_tokens(&self, tokens: &[Token]) -> bool {
+        tokens.iter().any(|token| match token.kind {
+            crate::lexer::TokenKind::Keyword(
+                Keyword::Const
+                | Keyword::Enum
+                | Keyword::Switch
+                | Keyword::Match
+                | Keyword::Case
+                | Keyword::Default
+                | Keyword::Fallthrough
+                | Keyword::Object
+                | Keyword::Extends
+                | Keyword::Task
+                | Keyword::Yield
+                | Keyword::Spawn
+                | Keyword::Catch,
+            ) => true,
+            crate::lexer::TokenKind::Symbol(
+                Symbol::DoubleQuestion
+                | Symbol::DoubleQuestionEqual
+                | Symbol::PipeGreater,
+            ) => true,
+            _ => false,
+        })
     }
 }
 
@@ -724,5 +758,125 @@ type Config = {
         assert!(artifact.luau.contains("type Config = { host: string, port: number }"));
         assert!(!artifact.luau.contains("readonly host"));
         assert!(!artifact.luau.contains("read host"));
+    }
+
+    #[test]
+    fn lowers_phase6_objects_and_inheritance() {
+        let source = r#"
+object Animal
+    name: string
+    sound: string
+
+    function new(name: string, sound: string): Animal
+        self.name = name
+        self.sound = sound
+    end
+
+    function speak(): string
+        return self.sound
+    end
+
+    function static create(name: string): Animal
+        return Animal.new(name, "...")
+    end
+end
+
+object Dog extends Animal
+    breed: string
+
+    function new(name: string, breed: string): Dog
+        super.new(name, "Woof")
+        self.breed = breed
+    end
+
+    function speak(): string
+        return super.speak(self)
+    end
+end
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("type Animal = { name: string, sound: string, speak: (Animal) -> string }"));
+        assert!(output.contains("local Animal = {}"));
+        assert!(output.contains("Animal.__index = Animal"));
+        assert!(output.contains("function Animal.new(name: string, sound: string): Animal"));
+        assert!(output.contains("local self = setmetatable({} :: Animal, Animal)"));
+        assert!(output.contains("function Animal:speak(): string"));
+        assert!(output.contains("function Animal.create(name: string): Animal"));
+        assert!(output.contains("type Dog = Animal & { breed: string, speak: (Dog) -> string }"));
+        assert!(output.contains("setmetatable(Dog, { __index = Animal })"));
+        assert!(output.contains("local self = Animal.new(name, \"Woof\") :: Dog"));
+        assert!(output.contains("setmetatable(self, Dog)"));
+        assert!(output.contains("return Animal.speak(self)"));
+    }
+
+    #[test]
+    fn lowers_phase6_task_functions_and_spawn() {
+        let source = r#"
+task function loadPlayer(id: number): Player
+    local data = yield fetchData(id)
+    local inv = yield fetchInventory(id)
+    return buildPlayer(data, inv)
+end
+
+spawn loadPlayer(42)
+    then |player|
+        setupHUD(player)
+    catch |err|
+        warn("Failed:", err)
+end
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("local function loadPlayer(id: number): thread"));
+        assert!(output.contains("return coroutine.create(function()"));
+        assert!(output.contains("local data = coroutine.yield(fetchData(id))"));
+        assert!(output.contains("local inv = coroutine.yield(fetchInventory(id))"));
+        assert!(output.contains("local _co"));
+        assert!(output.contains("coroutine.resume("));
+        assert!(output.contains("coroutine.status("));
+        assert!(output.contains("local player ="));
+        assert!(output.contains("setupHUD(player)"));
+        assert!(output.contains("local err ="));
+        assert!(output.contains("warn(\"Failed:\", err)"));
+    }
+
+    #[test]
+    fn rejects_yield_outside_task_function() {
+        let source = r#"
+local value = yield fetchData(1)
+"#;
+        let err = compiler().compile_source(source).unwrap_err();
+        assert!(format!("{err}").contains("`yield` is only valid inside a task function"));
+    }
+
+    #[test]
+    fn lowers_phase6_spawn_for_roblox_adapter() {
+        let root = temp_project("phase6_roblox_spawn");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "target": "roblox",
+  "taskAdapter": "roblox"
+}"#,
+        );
+        write_file(
+            &root,
+            "src/main.xl",
+            r#"
+task function animate(model: Model)
+    yield waitForFrame()
+    return model
+end
+
+spawn animate(workspace.Model)
+"#,
+        );
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
+        assert!(artifact.luau.contains("task.spawn(function()"));
+        assert!(artifact.luau.contains("local _co"));
+        assert!(artifact.luau.contains("coroutine.resume("));
     }
 }
