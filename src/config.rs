@@ -1,0 +1,127 @@
+use serde::Deserialize;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use crate::compiler::{CompilerError, Result};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct XluauConfig {
+    #[serde(default = "default_version")]
+    pub version: u32,
+    #[serde(default = "default_include")]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    #[serde(default = "default_out_dir")]
+    pub out_dir: PathBuf,
+    #[serde(default = "default_target")]
+    pub target: String,
+    #[serde(default = "default_luau_target")]
+    pub luau_target: String,
+    #[serde(default = "default_base_dir")]
+    pub base_dir: PathBuf,
+    #[serde(default)]
+    pub paths: BTreeMap<String, String>,
+    #[serde(default = "default_extensions")]
+    pub extensions: Vec<String>,
+    #[serde(default = "default_index_files")]
+    pub index_files: Vec<String>,
+    #[serde(default = "default_true")]
+    pub source_maps: bool,
+    #[serde(default)]
+    pub line_pragmas: bool,
+    #[serde(default = "default_true")]
+    pub strict: bool,
+    #[serde(default = "default_true")]
+    pub no_implicit_any: bool,
+    #[serde(default = "default_true")]
+    pub no_unchecked_optional: bool,
+    #[serde(default = "default_task_adapter")]
+    pub task_adapter: String,
+}
+
+impl Default for XluauConfig {
+    fn default() -> Self {
+        Self {
+            version: default_version(),
+            include: default_include(),
+            exclude: Vec::new(),
+            out_dir: default_out_dir(),
+            target: default_target(),
+            luau_target: default_luau_target(),
+            base_dir: default_base_dir(),
+            paths: BTreeMap::new(),
+            extensions: default_extensions(),
+            index_files: default_index_files(),
+            source_maps: default_true(),
+            line_pragmas: false,
+            strict: default_true(),
+            no_implicit_any: default_true(),
+            no_unchecked_optional: default_true(),
+            task_adapter: default_task_adapter(),
+        }
+    }
+}
+
+impl XluauConfig {
+    pub fn load_from(root: &Path) -> Result<Self> {
+        let config_path = root.join("xluau.config.json");
+        if !config_path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = fs::read_to_string(&config_path).map_err(|source| CompilerError::Io {
+            path: config_path.clone(),
+            source,
+        })?;
+
+        serde_json::from_str(&contents).map_err(|source| CompilerError::Config {
+            path: config_path,
+            source,
+        })
+    }
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+fn default_include() -> Vec<String> {
+    vec!["src/**/*.xl".to_string()]
+}
+
+fn default_out_dir() -> PathBuf {
+    PathBuf::from("out")
+}
+
+fn default_target() -> String {
+    "filesystem".to_string()
+}
+
+fn default_luau_target() -> String {
+    "new-solver".to_string()
+}
+
+fn default_base_dir() -> PathBuf {
+    PathBuf::from("src")
+}
+
+fn default_extensions() -> Vec<String> {
+    vec![".xl".to_string(), ".luau".to_string(), ".lua".to_string()]
+}
+
+fn default_index_files() -> Vec<String> {
+    vec!["init".to_string()]
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_task_adapter() -> String {
+    "coroutine".to_string()
+}
