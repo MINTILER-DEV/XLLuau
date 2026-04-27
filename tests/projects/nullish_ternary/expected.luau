@@ -1,7 +1,4 @@
 local config = {}
-local isAdmin = false
-local primary = nil
-local secondary = 5
 local _lhs0 = config.timeout
 local timeout = (if _lhs0 ~= nil then _lhs0 else 30)
 local role = (if isAdmin then "admin" else "user")
