@@ -1,0 +1,14 @@
+local numbers = { 1, 2, 3, 4 }
+local matrix = { { 1, 2 }, { 3, 4 } }
+local result = { kind = "ok", value = 2 }
+
+local doubled = { x * 2 for _, x in numbers if x % 2 == 0 }
+local squared = { [x] = x ^ 2 for _, x in numbers }
+local flat = { value for _, row in matrix for _, value in row }
+
+match result
+    { kind = "ok", value = value }
+        print(value, doubled[1], squared[2], flat[4])
+    { kind = "err", error = message }
+        print(message)
+end

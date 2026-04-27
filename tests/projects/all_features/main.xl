@@ -1,0 +1,36 @@
+enum Direction
+    North
+    South
+    East
+    West
+end
+
+local config = { timeout = nil, filters = { 1, 2, 3, 4 }, mode = Direction.North }
+local stats = {}
+local result = { kind = "ok", value = { items = { 2, 4 } } }
+local fallback = 99
+
+local timeout = config.timeout ?? 30
+stats.total ??= 0
+stats.total += 1
+
+local selected = result?.value?.items?.[1] ?? fallback
+local doubled = { x * 2 for _, x in config.filters if x > 1 }
+local distance = do
+    local base = selected ?? 0
+    base + #doubled
+end
+
+local label = switch config.mode
+    case Direction.North then "north"
+    case Direction.South then "south"
+    case Direction.East then "east"
+    default then "west"
+end
+
+match result
+    { kind = "ok", value = data }
+        print(timeout, stats.total, selected, label, distance, data.items[2])
+    { kind = "err", error = message }
+        print(message)
+end

@@ -63,6 +63,21 @@ fn project_mixed_features() {
 }
 
 #[test]
+fn project_switch_enum_do() {
+    assert_fixture("switch_enum_do", "main.xl");
+}
+
+#[test]
+fn project_match_comprehension() {
+    assert_fixture("match_comprehension", "main.xl");
+}
+
+#[test]
+fn project_all_features() {
+    assert_fixture("all_features", "main.xl");
+}
+
+#[test]
 fn project_luau_passthrough() {
     assert_fixture("luau_passthrough", "main.luau");
 }

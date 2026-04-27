@@ -529,4 +529,106 @@ local parent = require("../parent")
         assert!(output.contains(r#"require "./sibling""#));
         assert!(output.contains(r#"require("../parent")"#));
     }
+
+    #[test]
+    fn lowers_phase4_switch_enum_and_do_expression() {
+        let source = r#"
+enum Direction
+    North
+    South
+    East
+    West
+end
+
+local dir: Direction = Direction.North
+
+switch dir
+    case Direction.North
+        print("north")
+    case Direction.South
+        print("south")
+    case Direction.East
+        print("east")
+    case Direction.West
+        print("west")
+end
+
+local label = switch dir
+    case Direction.North then "N"
+    case Direction.South then "S"
+    default then "?"
+end
+
+local distance = do
+    local dx = b.x - a.x
+    local dy = b.y - a.y
+    math.sqrt(dx ^ 2 + dy ^ 2)
+end
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("type Direction = \"North\" | \"South\" | \"East\" | \"West\""));
+        assert!(output.contains("local Direction = table.freeze({"));
+        assert!(output.contains("local _sw"));
+        assert!(output.contains("local _swexpr"));
+        assert!(output.contains("local _de"));
+        assert!(output.contains("math.sqrt"));
+    }
+
+    #[test]
+    fn lowers_phase4_match_and_comprehensions() {
+        let source = r#"
+type Result = { kind: "ok", value: number } | { kind: "err", error: string }
+
+local doubled = { x * 2 for _, x in numbers if x > 0 }
+local byValue = { [x] = x ^ 2 for _, x in numbers }
+local flat = { value for _, row in matrix for _, value in row }
+
+match result
+    { kind = "ok", value = v }
+        print(v)
+    { kind = "err", error = e }
+        print(e)
+end
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("local _comp"));
+        assert!(output.contains("table.insert("));
+        assert!(output.contains("for _, x in numbers do"));
+        assert!(output.contains("local _mbind"));
+        assert!(output.contains("local _mcond"));
+        assert!(output.contains("print(v)"));
+        assert!(output.contains("print(e)"));
+    }
+
+    #[test]
+    fn rejects_non_exhaustive_switch_over_union() {
+        let source = r#"
+type Direction = "North" | "South"
+local dir: Direction = "North"
+
+switch dir
+    case "North"
+        print("north")
+end
+"#;
+        let err = compiler().compile_source(source).unwrap_err();
+        assert!(format!("{err}").contains("non-exhaustive switch"));
+        assert!(format!("{err}").contains("South"));
+    }
+
+    #[test]
+    fn rejects_non_exhaustive_match_over_discriminated_union() {
+        let source = r#"
+type Result = { kind: "ok", value: number } | { kind: "err", error: string }
+local result: Result = { kind = "ok", value = 1 }
+
+match result
+    { kind = "ok", value = v }
+        print(v)
+end
+"#;
+        let err = compiler().compile_source(source).unwrap_err();
+        assert!(format!("{err}").contains("non-exhaustive match"));
+        assert!(format!("{err}").contains("err"));
+    }
 }

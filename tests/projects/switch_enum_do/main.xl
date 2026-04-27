@@ -1,0 +1,36 @@
+enum Direction
+    North
+    South
+    East
+    West
+end
+
+local origin = { x = 0, y = 0 }
+local point = { x = 3, y = 4 }
+local dir: Direction = Direction.East
+
+local distance = do
+    local dx = point.x - origin.x
+    local dy = point.y - origin.y
+    math.sqrt(dx ^ 2 + dy ^ 2)
+end
+
+local label = switch dir
+    case Direction.North then "N"
+    case Direction.South then "S"
+    case Direction.East then "E"
+    default then "W"
+end
+
+switch dir
+    case Direction.North
+        print("north")
+    case Direction.South
+        print("south")
+    case Direction.East
+        print("east")
+    case Direction.West
+        print("west")
+end
+
+print(distance, label)
