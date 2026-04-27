@@ -198,7 +198,7 @@ impl Compiler {
         let tokens = Lexer::new(source).tokenize()?;
         let mut parser = Parser::new(source, tokens);
         let program = parser.parse_program()?;
-        let mut emitter = Emitter::new();
+        let mut emitter = Emitter::with_luau_target(self.config.luau_target.clone());
         let raw = emitter.emit_program(&program)?;
         let rewritten_output = resolver.rewrite_requires(&raw, path)?;
         self.validate_luau(&rewritten_output)?;
@@ -630,5 +630,99 @@ end
         let err = compiler().compile_source(source).unwrap_err();
         assert!(format!("{err}").contains("non-exhaustive match"));
         assert!(format!("{err}").contains("err"));
+    }
+
+    #[test]
+    fn lowers_phase5_generics_and_explicit_type_arguments() {
+        let source = r#"
+local function max<T extends Comparable>(a: T, b: T): T
+    return if a > b then a else b
+end
+
+local function makeEmpty<T>(): T
+    return nil :: any
+end
+
+local function fetch<T, Err = string>(url: string): Result<T, Err>
+    return nil :: any
+end
+
+local empty = makeEmpty::<{ x: number, y: number }>()
+local user = fetch::<User>("/api/user")
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("local function max<T>(a: (T & Comparable), b: (T & Comparable)): T"));
+        assert!(output.contains("((makeEmpty :: () -> { x: number, y: number }))()"));
+        assert!(output.contains("((fetch :: (string) -> Result<User, string>))(\"/api/user\")"));
+    }
+
+    #[test]
+    fn lowers_phase5_type_utilities_and_freeze() {
+        let source = r#"
+type Config = {
+    readonly host: string,
+    port: number,
+    timeout: number?,
+}
+
+type PartialConfig = Partial<Config>
+type HostConfig = Pick<Config, "host" | "port">
+type Flags = Record<"debug" | "verbose", boolean>
+type Present = Exclude<"ok" | "err" | nil, nil>
+
+local function fetchUser(id: string, retries: number): User
+    return nil :: any
+end
+
+type UserResult = ReturnType<typeof(fetchUser)>
+type FetchParams = Parameters<typeof(fetchUser)>
+
+const DEFAULTS = freeze {
+    timeout = 30,
+    retries = 3,
+    host = "localhost",
+}
+
+type Defaults = Readonly<typeof(DEFAULTS)>
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("type Config = { host: string, port: number, timeout: number? }"));
+        assert!(output.contains("type PartialConfig = { host: string?, port: number?, timeout: number? }"));
+        assert!(output.contains("type HostConfig = { host: string, port: number }"));
+        assert!(output.contains("type Flags = { debug: boolean, verbose: boolean }"));
+        assert!(output.contains("type Present = \"ok\" | \"err\""));
+        assert!(output.contains("type UserResult = User"));
+        assert!(output.contains("type FetchParams = (string, number)"));
+        assert!(output.contains("local DEFAULTS = table.freeze({timeout = 30, retries = 3, host = \"localhost\"})"));
+        assert!(output.contains("type Defaults = { timeout: number, retries: number, host: string }"));
+    }
+
+    #[test]
+    fn lowers_phase5_readonly_for_legacy_target() {
+        let root = temp_project("phase5_legacy_readonly");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "luauTarget": "legacy"
+}"#,
+        );
+        write_file(
+            &root,
+            "src/main.xl",
+            r#"
+type Config = {
+    readonly host: string,
+    port: number,
+}
+"#,
+        );
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
+        assert!(artifact.luau.contains("type Config = { host: string, port: number }"));
+        assert!(!artifact.luau.contains("readonly host"));
+        assert!(!artifact.luau.contains("read host"));
     }
 }

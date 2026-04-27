@@ -431,11 +431,13 @@ impl<'src> Parser<'src> {
             }
             if self.match_symbol(Symbol::Colon) {
                 let name = self.expect_identifier()?;
+                let type_args = self.parse_explicit_type_args()?;
                 let args = self.parse_args()?;
                 expr = self.push_segment(
                     expr,
                     ChainSegment::MethodCall {
                         name,
+                        type_args,
                         args,
                         safe: false,
                     },
@@ -444,7 +446,13 @@ impl<'src> Parser<'src> {
             }
             if self.current().span.line == start_line && self.check_call_start() {
                 let args = self.parse_args()?;
-                expr = self.push_segment(expr, ChainSegment::Call { args });
+                expr = self.push_segment(
+                    expr,
+                    ChainSegment::Call {
+                        type_args: None,
+                        args,
+                    },
+                );
                 continue;
             }
             break;
@@ -752,6 +760,12 @@ impl<'src> Parser<'src> {
         }
         if self.match_keyword(Keyword::Function) {
             return self.parse_function_expr();
+        }
+        if self.check_identifier_named("freeze") && self.check_symbol_at(1, Symbol::LBrace) {
+            self.bump();
+            self.expect_symbol(Symbol::LBrace)?;
+            let table = self.parse_table_expr()?;
+            return Ok(Expr::Freeze(Box::new(table)));
         }
         if self.match_keyword(Keyword::Not) {
             return Ok(Expr::Unary {
@@ -1125,20 +1139,34 @@ impl<'src> Parser<'src> {
             }
             if self.match_symbol(Symbol::Colon) {
                 let name = self.expect_identifier()?;
+                let type_args = self.parse_explicit_type_args()?;
                 let args = self.parse_args()?;
                 expr = self.push_segment(
                     expr,
                     ChainSegment::MethodCall {
                         name,
+                        type_args,
                         args,
                         safe: false,
                     },
                 );
                 continue;
             }
+            if self.check_symbol(Symbol::DoubleColon) && self.check_symbol_at(1, Symbol::Less) {
+                let type_args = self.parse_explicit_type_args()?;
+                let args = self.parse_args()?;
+                expr = self.push_segment(expr, ChainSegment::Call { type_args, args });
+                continue;
+            }
             if self.check_call_start_same_line() {
                 let args = self.parse_args()?;
-                expr = self.push_segment(expr, ChainSegment::Call { args });
+                expr = self.push_segment(
+                    expr,
+                    ChainSegment::Call {
+                        type_args: None,
+                        args,
+                    },
+                );
                 continue;
             }
             if self.check_symbol(Symbol::Question)
@@ -1163,17 +1191,24 @@ impl<'src> Parser<'src> {
                 self.bump();
                 self.bump();
                 let name = self.expect_identifier()?;
+                let type_args = self.parse_explicit_type_args()?;
                 if self.check_call_start_same_line() {
                     let args = self.parse_args()?;
                     expr = self.push_segment(
                         expr,
                         ChainSegment::MethodCall {
                             name,
+                            type_args,
                             args,
                             safe: true,
                         },
                     );
                 } else {
+                    if type_args.is_some() {
+                        return Err(self.error_here(
+                            "explicit type arguments require a method call",
+                        ));
+                    }
                     expr = self.push_segment(expr, ChainSegment::Field { name, safe: true });
                 }
                 continue;
@@ -1237,6 +1272,35 @@ impl<'src> Parser<'src> {
         }
 
         Ok(expr)
+    }
+
+    fn parse_explicit_type_args(&mut self) -> Result<Option<Vec<String>>> {
+        if !(self.check_symbol(Symbol::DoubleColon) && self.check_symbol_at(1, Symbol::Less)) {
+            return Ok(None);
+        }
+
+        self.expect_symbol(Symbol::DoubleColon)?;
+        self.expect_symbol(Symbol::Less)?;
+
+        let mut args = Vec::new();
+        if self.match_symbol(Symbol::Greater) {
+            return Ok(Some(args));
+        }
+
+        loop {
+            let arg = self.collect_type_annotation(&[
+                StopToken::Symbol(Symbol::Comma),
+                StopToken::Symbol(Symbol::Greater),
+            ])?;
+            args.push(arg);
+            if self.match_symbol(Symbol::Comma) {
+                continue;
+            }
+            self.expect_symbol(Symbol::Greater)?;
+            break;
+        }
+
+        Ok(Some(args))
     }
 
     fn parse_args(&mut self) -> Result<Vec<Expr>> {
@@ -1650,6 +1714,7 @@ fn symbol_text(symbol: Symbol) -> &'static str {
         Symbol::Percent => "%",
         Symbol::Caret => "^",
         Symbol::Pipe => "|",
+        Symbol::Ampersand => "&",
         Symbol::Hash => "#",
         Symbol::DoubleDot => "..",
         Symbol::Ellipsis => "...",

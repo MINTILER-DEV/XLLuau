@@ -208,6 +208,7 @@ pub enum Expr {
     Name(String),
     Table(Vec<TableField>),
     Function(FunctionExpr),
+    Freeze(Box<Expr>),
     IfElse {
         branches: Vec<(Expr, Expr)>,
         else_expr: Box<Expr>,
@@ -350,10 +351,12 @@ pub enum ChainSegment {
         safe: bool,
     },
     Call {
+        type_args: Option<Vec<String>>,
         args: Vec<Expr>,
     },
     MethodCall {
         name: String,
+        type_args: Option<Vec<String>>,
         args: Vec<Expr>,
         safe: bool,
     },

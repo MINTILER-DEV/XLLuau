@@ -7,9 +7,13 @@ use crate::{
 
 pub struct Emitter {
     temp_counter: usize,
+    _luau_target: String,
     const_scopes: Vec<HashSet<String>>,
     type_scopes: Vec<HashMap<String, String>>,
+    function_scopes: Vec<HashMap<String, FunctionSignature>>,
     type_defs: HashMap<String, TypeShape>,
+    type_alias_bodies: HashMap<String, String>,
+    value_type_scopes: Vec<HashMap<String, String>>,
     errors: Vec<String>,
 }
 
@@ -45,13 +49,35 @@ enum TypeShape {
     },
 }
 
+#[derive(Debug, Clone)]
+struct GenericParamSpec {
+    name: String,
+    constraint: Option<String>,
+    default: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionSignature {
+    generics: Vec<GenericParamSpec>,
+    params: Vec<Option<String>>,
+    return_type: Option<String>,
+}
+
 impl Emitter {
     pub fn new() -> Self {
+        Self::with_luau_target("new-solver")
+    }
+
+    pub fn with_luau_target(luau_target: impl Into<String>) -> Self {
         Self {
             temp_counter: 0,
+            _luau_target: luau_target.into(),
             const_scopes: vec![HashSet::new()],
             type_scopes: vec![HashMap::new()],
+            function_scopes: vec![HashMap::new()],
             type_defs: HashMap::new(),
+            type_alias_bodies: HashMap::new(),
+            value_type_scopes: vec![HashMap::new()],
             errors: Vec::new(),
         }
     }
@@ -70,6 +96,9 @@ impl Emitter {
     fn emit_block(&mut self, block: &Block, indent: usize) -> Result<String> {
         self.const_scopes.push(HashSet::new());
         self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
+        self.predeclare_block(block);
         let mut lines = Vec::new();
         for stmt in block {
             let chunk = self.emit_stmt(stmt, indent)?;
@@ -79,6 +108,8 @@ impl Emitter {
         }
         self.const_scopes.pop();
         self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
         Ok(lines.join("\n"))
     }
 
@@ -131,8 +162,9 @@ impl Emitter {
                 Ok(String::new())
             }
             Stmt::TypeAlias { raw } => {
-                self.register_type_alias(raw);
-                Ok(self.indent(indent, raw))
+                let rewritten = self.rewrite_type_alias(raw);
+                self.register_type_alias(&rewritten);
+                Ok(self.indent(indent, &rewritten))
             }
         }
     }
@@ -150,7 +182,7 @@ impl Emitter {
             let annotation = binding
                 .type_annotation
                 .as_ref()
-                .map(|text| format!(": {text}"))
+                .map(|text| format!(": {}", self.rewrite_type_text(text)))
                 .unwrap_or_default();
             if let Some(value) = local.values.first() {
                 let lowered = self.emit_expr(value, None)?;
@@ -184,6 +216,7 @@ impl Emitter {
             self.declare_local_names(&binding.pattern, local.is_const);
             self.declare_pattern_types(&binding.pattern, &binding.type_annotation);
         }
+        self.declare_local_value_types(local);
 
         Ok(parts.join("\n"))
     }
@@ -219,7 +252,7 @@ impl Emitter {
                 let keyword = if is_local { "local " } else { "" };
                 let annotation = type_annotation
                     .as_ref()
-                    .map(|text| format!(": {text}"))
+                    .map(|text| format!(": {}", self.rewrite_type_text(text)))
                     .unwrap_or_default();
                 parts.push(self.indent(indent, &format!("{keyword}{name}{annotation} = {source}")));
             }
@@ -312,13 +345,17 @@ impl Emitter {
             format!("function {name}")
         };
 
-        let (params, prologue) = self.lower_params(&function.params)?;
+        let generic_specs = self.parse_generic_params(function.generics.as_deref());
+        let emitted_generics = self.render_generic_params(&generic_specs);
+        let (params, prologue) = self.lower_params(&function.params, &generic_specs)?;
         if function.local_name {
             self.declare_name(&function.name.root, false);
         }
 
         self.const_scopes.push(HashSet::new());
         self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
         for name in self.collect_param_names(&function.params) {
             self.declare_name(&name, false);
         }
@@ -333,14 +370,18 @@ impl Emitter {
         }
         self.const_scopes.pop();
         self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
 
-        let generics = function.generics.clone().unwrap_or_default();
         let return_type = function
             .return_type
             .as_ref()
-            .map(|text| format!(": {text}"))
+            .map(|text| format!(": {}", self.rewrite_type_text(text)))
             .unwrap_or_default();
-        let signature = format!("{header}{generics}({}){return_type}", params.join(", "));
+        let signature = format!(
+            "{header}{emitted_generics}({}){return_type}",
+            params.join(", ")
+        );
 
         let mut parts = vec![self.indent(indent, &signature)];
         if !body_lines.is_empty() {
@@ -1051,10 +1092,11 @@ impl Emitter {
                 let lowered = self.emit_expr(expr, placeholder)?;
                 Ok(LoweredExpr {
                     setup: lowered.setup,
-                    expr: format!("({} :: {annotation})", lowered.expr),
+                    expr: format!("({} :: {})", lowered.expr, self.rewrite_type_text(annotation)),
                     reuse_safe: false,
                 })
             }
+            Expr::Freeze(expr) => self.emit_freeze_expr(expr, placeholder),
             Expr::Binary { left, op, right } => {
                 self.emit_binary_expr(left, *op, right, placeholder)
             }
@@ -1378,21 +1420,29 @@ impl Emitter {
         function: &FunctionExpr,
         _placeholder: Option<&str>,
     ) -> Result<LoweredExpr> {
-        let (params, prologue) = self.lower_params(&function.params)?;
+        let generic_specs = self.parse_generic_params(function.generics.as_deref());
+        let emitted_generics = self.render_generic_params(&generic_specs);
+        let (params, prologue) = self.lower_params(&function.params, &generic_specs)?;
         self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
         for name in self.collect_param_names(&function.params) {
             self.declare_name(&name, false);
         }
+        self.declare_param_types(&function.params);
         let body = self.emit_block(&function.body, 1)?;
         self.const_scopes.pop();
-        let generics = function.generics.clone().unwrap_or_default();
+        self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
         let return_type = function
             .return_type
             .as_ref()
-            .map(|text| format!(": {text}"))
+            .map(|text| format!(": {}", self.rewrite_type_text(text)))
             .unwrap_or_default();
         let mut lines = vec![format!(
-            "function{generics}({}){return_type}",
+            "function{emitted_generics}({}){return_type}",
             params.join(", ")
         )];
         for line in prologue {
@@ -1437,15 +1487,27 @@ impl Emitter {
                     lowered.setup.extend(index.setup);
                     expr = format!("{expr}[{}]", index.expr);
                 }
-                ChainSegment::Call { args } => {
-                    let args = self.emit_args(args, placeholder)?;
-                    lowered.setup.extend(args.0);
-                    expr = format!("{expr}({})", args.1.join(", "));
+                ChainSegment::Call { type_args, args } => {
+                    let invocation =
+                        self.emit_explicit_type_call(&expr, type_args.as_deref(), args, placeholder)?;
+                    lowered.setup.extend(invocation.setup);
+                    expr = invocation.expr;
                 }
-                ChainSegment::MethodCall { name, args, .. } => {
-                    let args = self.emit_args(args, placeholder)?;
-                    lowered.setup.extend(args.0);
-                    expr = format!("{expr}:{name}({})", args.1.join(", "));
+                ChainSegment::MethodCall {
+                    name,
+                    type_args,
+                    args,
+                    ..
+                } => {
+                    let method_expr = format!("{expr}:{name}");
+                    let invocation = self.emit_explicit_type_call(
+                        &method_expr,
+                        type_args.as_deref(),
+                        args,
+                        placeholder,
+                    )?;
+                    lowered.setup.extend(invocation.setup);
+                    expr = invocation.expr;
                 }
             }
         }
@@ -1503,21 +1565,30 @@ impl Emitter {
                         self.indent(nesting, &format!("{current} = {current}[{}]", lowered.expr)),
                     );
                 }
-                ChainSegment::Call { args } => {
-                    let (arg_setup, arg_values) = self.emit_args(args, placeholder)?;
-                    setup.extend(self.indent_lines(nesting, arg_setup));
-                    setup.push(self.indent(
-                        nesting,
-                        &format!("{current} = {current}({})", arg_values.join(", ")),
-                    ));
+                ChainSegment::Call { type_args, args } => {
+                    let invocation = self.emit_explicit_type_call(
+                        current.as_str(),
+                        type_args.as_deref(),
+                        args,
+                        placeholder,
+                    )?;
+                    setup.extend(self.indent_lines(nesting, invocation.setup));
+                    setup.push(self.indent(nesting, &format!("{current} = {}", invocation.expr)));
                 }
-                ChainSegment::MethodCall { name, args, .. } => {
-                    let (arg_setup, arg_values) = self.emit_args(args, placeholder)?;
-                    setup.extend(self.indent_lines(nesting, arg_setup));
-                    setup.push(self.indent(
-                        nesting,
-                        &format!("{current} = {current}:{name}({})", arg_values.join(", ")),
-                    ));
+                ChainSegment::MethodCall {
+                    name,
+                    type_args,
+                    args,
+                    ..
+                } => {
+                    let invocation = self.emit_explicit_type_call(
+                        &format!("{current}:{name}"),
+                        type_args.as_deref(),
+                        args,
+                        placeholder,
+                    )?;
+                    setup.extend(self.indent_lines(nesting, invocation.setup));
+                    setup.push(self.indent(nesting, &format!("{current} = {}", invocation.expr)));
                 }
             }
         }
@@ -1642,7 +1713,139 @@ impl Emitter {
         Ok((setup, values))
     }
 
-    fn lower_params(&mut self, params: &[Param]) -> Result<(Vec<String>, Vec<String>)> {
+    fn emit_freeze_expr(
+        &mut self,
+        expr: &Expr,
+        placeholder: Option<&str>,
+    ) -> Result<LoweredExpr> {
+        let lowered = self.emit_expr(expr, placeholder)?;
+        Ok(LoweredExpr {
+            setup: lowered.setup,
+            expr: format!("table.freeze({})", lowered.expr),
+            reuse_safe: false,
+        })
+    }
+
+    fn emit_explicit_type_call(
+        &mut self,
+        callee_expr: &str,
+        type_args: Option<&[String]>,
+        args: &[Expr],
+        placeholder: Option<&str>,
+    ) -> Result<LoweredExpr> {
+        let (setup, mut values) = self.emit_args(args, placeholder)?;
+        let Some(type_args) = type_args else {
+            return Ok(LoweredExpr {
+                setup,
+                expr: format!("{callee_expr}({})", values.join(", ")),
+                reuse_safe: false,
+            });
+        };
+
+        let Some(signature) = self.lookup_function_signature(callee_expr).cloned() else {
+            return Ok(LoweredExpr {
+                setup,
+                expr: format!("{callee_expr}({})", values.join(", ")),
+                reuse_safe: false,
+            });
+        };
+
+        let instantiated = self.instantiate_function_signature(&signature, type_args);
+        let should_cast_args = signature
+            .params
+            .iter()
+            .zip(instantiated.params.iter())
+            .any(|(raw, instantiated)| {
+                raw.as_ref()
+                    .map(|text| self.signature_uses_generics(text, &signature.generics))
+                    .unwrap_or(false)
+                    && instantiated.is_some()
+            });
+
+        if should_cast_args {
+            for (index, annotation) in instantiated.params.iter().enumerate() {
+                if let Some(annotation) = annotation
+                    && index < values.len()
+                    && signature.params[index]
+                        .as_ref()
+                        .map(|text| self.signature_uses_generics(text, &signature.generics))
+                        .unwrap_or(false)
+                {
+                    values[index] = format!("({} :: {})", values[index], annotation);
+                }
+            }
+            return Ok(LoweredExpr {
+                setup,
+                expr: format!("{callee_expr}({})", values.join(", ")),
+                reuse_safe: false,
+            });
+        }
+
+        let params = instantiated
+            .params
+            .iter()
+            .map(|param| param.clone().unwrap_or_else(|| "any".to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let return_type = instantiated
+            .return_type
+            .unwrap_or_else(|| "any".to_string());
+        Ok(LoweredExpr {
+            setup,
+            expr: format!(
+                "(({callee_expr} :: ({params}) -> {return_type}))({})",
+                values.join(", ")
+            ),
+            reuse_safe: false,
+        })
+    }
+
+    fn instantiate_function_signature(
+        &self,
+        signature: &FunctionSignature,
+        provided: &[String],
+    ) -> FunctionSignature {
+        let mut substitutions = HashMap::new();
+        for (index, generic) in signature.generics.iter().enumerate() {
+            let concrete = provided
+                .get(index)
+                .cloned()
+                .or_else(|| generic.default.clone())
+                .unwrap_or_else(|| generic.name.clone());
+            substitutions.insert(generic.name.clone(), self.rewrite_type_text(&concrete));
+        }
+
+        let instantiate = |text: &str| {
+            let mut value = text.to_string();
+            for (name, concrete) in &substitutions {
+                value = self.replace_type_identifier(&value, name, concrete);
+            }
+            self.rewrite_type_text(&value)
+        };
+
+        FunctionSignature {
+            generics: signature.generics.clone(),
+            params: signature
+                .params
+                .iter()
+                .map(|param| param.as_ref().map(|text| instantiate(text)))
+                .collect(),
+            return_type: signature.return_type.as_ref().map(|text| instantiate(text)),
+        }
+    }
+
+    fn signature_uses_generics(&self, text: &str, generics: &[GenericParamSpec]) -> bool {
+        generics.iter().any(|generic| {
+            self.replace_type_identifier(text, &generic.name, "__x")
+                != text
+        })
+    }
+
+    fn lower_params(
+        &mut self,
+        params: &[Param],
+        generic_specs: &[GenericParamSpec],
+    ) -> Result<(Vec<String>, Vec<String>)> {
         let mut rendered = Vec::new();
         let mut prologue = Vec::new();
         for (index, param) in params.iter().enumerate() {
@@ -1650,7 +1853,12 @@ impl Emitter {
                 Param::VarArg(type_annotation) => {
                     let annotation = type_annotation
                         .as_ref()
-                        .map(|text| format!(": {text}"))
+                        .map(|text| {
+                            format!(
+                                ": {}",
+                                self.rewrite_type_text_with_constraints(text, generic_specs)
+                            )
+                        })
                         .unwrap_or_default();
                     rendered.push(format!("...{annotation}"));
                 }
@@ -1659,7 +1867,12 @@ impl Emitter {
                         let annotation = binding
                             .type_annotation
                             .as_ref()
-                            .map(|text| format!(": {text}"))
+                            .map(|text| {
+                                format!(
+                                    ": {}",
+                                    self.rewrite_type_text_with_constraints(text, generic_specs)
+                                )
+                            })
                             .unwrap_or_default();
                         rendered.push(format!("{name}{annotation}"));
                     } else {
@@ -1667,7 +1880,12 @@ impl Emitter {
                         let annotation = binding
                             .type_annotation
                             .as_ref()
-                            .map(|text| format!(": {text}"))
+                            .map(|text| {
+                                format!(
+                                    ": {}",
+                                    self.rewrite_type_text_with_constraints(text, generic_specs)
+                                )
+                            })
                             .unwrap_or_default();
                         rendered.push(format!("{temp}{annotation}"));
                         self.emit_pattern_local(
@@ -1683,6 +1901,470 @@ impl Emitter {
             }
         }
         Ok((rendered, prologue))
+    }
+
+    fn predeclare_block(&mut self, block: &Block) {
+        for stmt in block {
+            match stmt {
+                Stmt::Function(function) => self.register_function_signature(function),
+                Stmt::Enum(decl) => self.register_enum_type(decl),
+                Stmt::TypeAlias { raw } => {
+                    let rewritten = self.rewrite_type_alias(raw);
+                    self.register_type_alias(&rewritten);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn register_function_signature(&mut self, function: &FunctionDecl) {
+        let key = self.function_key(&function.name);
+        let generics = self.parse_generic_params(function.generics.as_deref());
+        let params = function
+            .params
+            .iter()
+            .map(|param| match param {
+                Param::Binding(binding) => binding.type_annotation.clone(),
+                Param::VarArg(annotation) => annotation.clone(),
+            })
+            .map(|annotation| annotation.map(|text| self.rewrite_type_text(&text)))
+            .collect::<Vec<_>>();
+        let return_type = function
+            .return_type
+            .as_ref()
+            .map(|text| self.rewrite_type_text(text));
+        if let Some(scope) = self.function_scopes.last_mut() {
+            scope.insert(
+                key,
+                FunctionSignature {
+                    generics,
+                    params,
+                    return_type,
+                },
+            );
+        }
+    }
+
+    fn function_key(&self, name: &FunctionName) -> String {
+        let mut key = name.root.clone();
+        for field in &name.fields {
+            key.push('.');
+            key.push_str(field);
+        }
+        if let Some(method) = &name.method {
+            key.push(':');
+            key.push_str(method);
+        }
+        key
+    }
+
+    fn parse_generic_params(&self, generics: Option<&str>) -> Vec<GenericParamSpec> {
+        let Some(generics) = generics else {
+            return Vec::new();
+        };
+        let trimmed = generics.trim();
+        let inner = trimmed
+            .strip_prefix('<')
+            .and_then(|text| text.strip_suffix('>'))
+            .unwrap_or(trimmed);
+        if inner.trim().is_empty() {
+            return Vec::new();
+        }
+
+        self.split_top_level(inner, ',')
+            .into_iter()
+            .filter_map(|part| {
+                let piece = part.trim();
+                if piece.is_empty() {
+                    return None;
+                }
+                let (head, default) = if let Some(index) = piece.find('=') {
+                    (
+                        piece[..index].trim(),
+                        Some(self.rewrite_type_text(piece[index + 1..].trim())),
+                    )
+                } else {
+                    (piece, None)
+                };
+                let (name, constraint) = if let Some(index) = head.find("extends") {
+                    let name = head[..index].trim().to_string();
+                    let constraint = self.rewrite_type_text(head[index + "extends".len()..].trim());
+                    (name, Some(constraint))
+                } else {
+                    (head.trim().to_string(), None)
+                };
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(GenericParamSpec {
+                        name,
+                        constraint,
+                        default,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    fn render_generic_params(&self, generics: &[GenericParamSpec]) -> String {
+        if generics.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<{}>",
+                generics
+                    .iter()
+                    .map(|generic| generic.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+
+    fn rewrite_type_alias(&mut self, raw: &str) -> String {
+        let trimmed = raw.trim();
+        let export_prefix = if trimmed.starts_with("export type ") {
+            "export "
+        } else {
+            ""
+        };
+        let rest = trimmed.strip_prefix(export_prefix).unwrap_or(trimmed);
+        let Some(rest) = rest.strip_prefix("type ") else {
+            return raw.to_string();
+        };
+        let Some(eq_index) = rest.find('=') else {
+            return raw.to_string();
+        };
+        let left = rest[..eq_index].trim();
+        let rhs = rest[eq_index + 1..].trim();
+        let rewritten_rhs = self.rewrite_type_text(rhs);
+
+        let alias_name = left
+            .split('<')
+            .next()
+            .map(str::trim)
+            .unwrap_or(left)
+            .to_string();
+        self.type_alias_bodies
+            .insert(alias_name, rewritten_rhs.clone());
+
+        format!("{export_prefix}type {left} = {rewritten_rhs}")
+    }
+
+    fn rewrite_type_text(&self, text: &str) -> String {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        if let Some(expanded) = self.expand_builtin_type_utility(trimmed) {
+            return expanded;
+        }
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            return self.rewrite_table_type(trimmed);
+        }
+        trimmed.to_string()
+    }
+
+    fn rewrite_type_text_with_constraints(
+        &self,
+        text: &str,
+        generics: &[GenericParamSpec],
+    ) -> String {
+        let rewritten = self.rewrite_type_text(text);
+        self.apply_generic_constraints(&rewritten, generics)
+    }
+
+    fn apply_generic_constraints(&self, text: &str, generics: &[GenericParamSpec]) -> String {
+        let mut result = text.to_string();
+        for generic in generics {
+            let Some(constraint) = &generic.constraint else {
+                continue;
+            };
+            result = self.replace_type_identifier(
+                &result,
+                &generic.name,
+                &format!("({} & {})", generic.name, constraint),
+            );
+        }
+        result
+    }
+
+    fn replace_type_identifier(&self, text: &str, ident: &str, replacement: &str) -> String {
+        let chars = text.chars().collect::<Vec<_>>();
+        let ident_chars = ident.chars().collect::<Vec<_>>();
+        let mut output = String::new();
+        let mut index = 0usize;
+        while index < chars.len() {
+            let matches_ident = index + ident_chars.len() <= chars.len()
+                && chars[index..index + ident_chars.len()] == ident_chars[..]
+                && (index == 0 || !is_type_ident_continue(chars[index - 1]))
+                && (index + ident_chars.len() == chars.len()
+                    || !is_type_ident_continue(chars[index + ident_chars.len()]));
+            if matches_ident {
+                output.push_str(replacement);
+                index += ident_chars.len();
+            } else {
+                output.push(chars[index]);
+                index += 1;
+            }
+        }
+        output
+    }
+
+    fn rewrite_table_type(&self, text: &str) -> String {
+        let inner = &text[1..text.len() - 1];
+        let mut parts = Vec::new();
+        for piece in self.split_top_level(inner, ',') {
+            let field = piece.trim();
+            if field.is_empty() {
+                continue;
+            }
+            parts.push(self.rewrite_table_type_field(field));
+        }
+        format!("{{ {} }}", parts.join(", "))
+    }
+
+    fn rewrite_table_type_field(&self, field: &str) -> String {
+        let mut text = field.trim();
+        let mut readonly = false;
+        if let Some(rest) = text.strip_prefix("readonly ") {
+            readonly = true;
+            text = rest.trim();
+        }
+        let Some(colon_index) = text.find(':') else {
+            return text.to_string();
+        };
+        let key = text[..colon_index].trim();
+        let value = self.rewrite_type_text(text[colon_index + 1..].trim());
+        let prefix = if readonly {
+            ""
+        } else {
+            ""
+        };
+        format!("{prefix}{key}: {value}")
+    }
+
+    fn expand_builtin_type_utility(&self, text: &str) -> Option<String> {
+        let (name, args) = self.parse_type_application(text)?;
+        match name.as_str() {
+            "Partial" => {
+                let fields = self.resolve_table_type_fields(args.first()?.trim())?;
+                Some(self.render_table_type(
+                    &fields
+                        .into_iter()
+                        .map(|(key, value)| (key, self.make_optional_type(&value)))
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            "Required" => {
+                let fields = self.resolve_table_type_fields(args.first()?.trim())?;
+                Some(self.render_table_type(
+                    &fields
+                        .into_iter()
+                        .map(|(key, value)| (key, self.remove_optional_type(&value)))
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            "Readonly" => {
+                let fields = self.resolve_table_type_fields(args.first()?.trim())?;
+                let rendered = fields
+                    .into_iter()
+                    .map(|(key, value)| format!("{key}: {value}"))
+                    .collect::<Vec<_>>();
+                Some(format!("{{ {} }}", rendered.join(", ")))
+            }
+            "Pick" => {
+                let fields = self.resolve_table_type_fields(args.first()?.trim())?;
+                let keys = self.parse_string_literal_union(args.get(1)?.trim())?;
+                let kept = fields
+                    .into_iter()
+                    .filter(|(key, _)| keys.iter().any(|candidate| candidate == key))
+                    .collect::<Vec<_>>();
+                Some(self.render_table_type(&kept))
+            }
+            "Omit" => {
+                let fields = self.resolve_table_type_fields(args.first()?.trim())?;
+                let keys = self.parse_string_literal_union(args.get(1)?.trim())?;
+                let kept = fields
+                    .into_iter()
+                    .filter(|(key, _)| !keys.iter().any(|candidate| candidate == key))
+                    .collect::<Vec<_>>();
+                Some(self.render_table_type(&kept))
+            }
+            "Record" => {
+                let key_arg = args.first()?.trim();
+                let value_arg = self.rewrite_type_text(args.get(1)?.trim());
+                if let Some(keys) = self.parse_string_literal_union(key_arg) {
+                    Some(self.render_table_type(
+                        &keys.into_iter()
+                            .map(|key| (key, value_arg.clone()))
+                            .collect::<Vec<_>>(),
+                    ))
+                } else {
+                    Some(format!("{{ [{}]: {} }}", self.rewrite_type_text(key_arg), value_arg))
+                }
+            }
+            "Exclude" => {
+                let lhs = self
+                    .split_top_level(args.first()?.trim(), '|')
+                    .into_iter()
+                    .map(|part| part.trim().to_string())
+                    .collect::<Vec<_>>();
+                let rhs = self
+                    .split_top_level(args.get(1)?.trim(), '|')
+                    .into_iter()
+                    .map(|part| part.trim().to_string())
+                    .collect::<Vec<_>>();
+                Some(
+                    lhs.into_iter()
+                        .filter(|part| !rhs.iter().any(|candidate| candidate == part))
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                )
+            }
+            "ReturnType" => {
+                let target = self.parse_typeof_target(args.first()?.trim())?;
+                let signature = self.lookup_function_signature(&target)?;
+                signature.return_type.clone().or(Some("any".to_string()))
+            }
+            "Parameters" => {
+                let target = self.parse_typeof_target(args.first()?.trim())?;
+                let signature = self.lookup_function_signature(&target)?;
+                Some(format!(
+                    "({})",
+                    signature
+                        .params
+                        .iter()
+                        .map(|param| param.clone().unwrap_or_else(|| "any".to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_type_application(&self, text: &str) -> Option<(String, Vec<String>)> {
+        let trimmed = text.trim();
+        let less_index = trimmed.find('<')?;
+        if !trimmed.ends_with('>') {
+            return None;
+        }
+        let name = trimmed[..less_index].trim();
+        if name.is_empty() {
+            return None;
+        }
+        let inner = &trimmed[less_index + 1..trimmed.len() - 1];
+        let args = self
+            .split_top_level(inner, ',')
+            .into_iter()
+            .map(|part| part.trim().to_string())
+            .collect::<Vec<_>>();
+        Some((name.to_string(), args))
+    }
+
+    fn parse_typeof_target(&self, text: &str) -> Option<String> {
+        let trimmed = text.trim();
+        let inner = trimmed
+            .strip_prefix("typeof(")
+            .and_then(|value| value.strip_suffix(')'))?;
+        Some(inner.trim().to_string())
+    }
+
+    fn resolve_table_type_fields(&self, text: &str) -> Option<Vec<(String, String)>> {
+        let trimmed = text.trim();
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            return self.parse_table_type_fields(trimmed);
+        }
+        if let Some(name) = self.parse_typeof_target(trimmed)
+            && let Some(value_type) = self.lookup_value_type(&name)
+        {
+            return self.parse_table_type_fields(value_type);
+        }
+        let alias_name = self.simple_type_name(trimmed)?;
+        let alias_body = self.type_alias_bodies.get(&alias_name)?;
+        self.parse_table_type_fields(alias_body)
+    }
+
+    fn parse_table_type_fields(&self, text: &str) -> Option<Vec<(String, String)>> {
+        let trimmed = text.trim();
+        let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?;
+        let mut fields = Vec::new();
+        for piece in self.split_top_level(inner, ',') {
+            let field = piece.trim();
+            if field.is_empty() {
+                continue;
+            }
+            let field = field
+                .strip_prefix("readonly ")
+                .or_else(|| field.strip_prefix("read "))
+                .unwrap_or(field)
+                .trim();
+            let colon_index = field.find(':')?;
+            let key = field[..colon_index].trim().trim_matches('"').to_string();
+            let value = self.rewrite_type_text(field[colon_index + 1..].trim());
+            fields.push((key, value));
+        }
+        Some(fields)
+    }
+
+    fn render_table_type(&self, fields: &[(String, String)]) -> String {
+        format!(
+            "{{ {} }}",
+            fields
+                .iter()
+                .map(|(key, value)| format!("{key}: {value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn make_optional_type(&self, text: &str) -> String {
+        let trimmed = text.trim();
+        if trimmed.ends_with('?') {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}?")
+        }
+    }
+
+    fn remove_optional_type(&self, text: &str) -> String {
+        text.trim().trim_end_matches('?').trim().to_string()
+    }
+
+    fn parse_string_literal_union(&self, text: &str) -> Option<Vec<String>> {
+        let mut values = Vec::new();
+        for part in self.split_top_level(text, '|') {
+            let piece = part.trim();
+            let unquoted = piece
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .or_else(|| {
+                    piece.strip_prefix('\'')
+                        .and_then(|value| value.strip_suffix('\''))
+                })?;
+            values.push(unquoted.to_string());
+        }
+        Some(values)
+    }
+
+    fn lookup_function_signature(&self, callee: &str) -> Option<&FunctionSignature> {
+        for scope in self.function_scopes.iter().rev() {
+            if let Some(signature) = scope.get(callee) {
+                return Some(signature);
+            }
+        }
+        None
+    }
+
+    fn lookup_value_type(&self, name: &str) -> Option<&str> {
+        for scope in self.value_type_scopes.iter().rev() {
+            if let Some(value_type) = scope.get(name) {
+                return Some(value_type);
+            }
+        }
+        None
     }
 
     fn register_enum_type(&mut self, decl: &EnumDecl) {
@@ -1712,6 +2394,23 @@ impl Emitter {
     }
 
     fn register_type_alias(&mut self, raw: &str) {
+        let trimmed = raw.trim();
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        if let Some(rest) = trimmed.strip_prefix("type ")
+            && let Some(eq_index) = rest.find('=')
+        {
+            let name = rest[..eq_index]
+                .trim()
+                .split('<')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let rhs = rest[eq_index + 1..].trim().to_string();
+            if !name.is_empty() {
+                self.type_alias_bodies.insert(name, rhs);
+            }
+        }
         let Some((name, shape)) = self.parse_type_alias_shape(raw) else {
             return;
         };
@@ -1799,7 +2498,12 @@ impl Emitter {
                 continue;
             }
             let colon_index = piece.find(':')?;
-            let key = piece[..colon_index].trim().to_string();
+            let key = piece[..colon_index]
+                .trim()
+                .trim_start_matches("readonly ")
+                .trim_start_matches("read ")
+                .trim()
+                .to_string();
             let value = piece[colon_index + 1..].trim();
             if self.is_literal_text(value) {
                 fields.insert(key, value.to_string());
@@ -1881,7 +2585,8 @@ impl Emitter {
     fn declare_pattern_types(&mut self, pattern: &Pattern, annotation: &Option<String>) {
         let Some(type_name) = annotation
             .as_ref()
-            .and_then(|annotation| self.simple_type_name(annotation))
+            .map(|annotation| self.rewrite_type_text(annotation))
+            .and_then(|annotation| self.simple_type_name(&annotation))
         else {
             return;
         };
@@ -2080,6 +2785,7 @@ impl Emitter {
                 }) || self.contains_placeholder(else_expr)
             }
             Expr::DoExpr { result, .. } => self.contains_placeholder(result),
+            Expr::Freeze(inner) => self.contains_placeholder(inner),
             Expr::SwitchExpr {
                 value,
                 cases,
@@ -2097,7 +2803,8 @@ impl Emitter {
                     || segments.iter().any(|segment| match segment {
                         ChainSegment::Field { .. } => false,
                         ChainSegment::Index { expr, .. } => self.contains_placeholder(expr),
-                        ChainSegment::Call { args } | ChainSegment::MethodCall { args, .. } => {
+                        ChainSegment::Call { args, .. }
+                        | ChainSegment::MethodCall { args, .. } => {
                             args.iter().any(|arg| self.contains_placeholder(arg))
                         }
                     })
@@ -2229,6 +2936,47 @@ impl Emitter {
         }
     }
 
+    fn declare_local_value_types(&mut self, local: &LocalDecl) {
+        if local.bindings.len() != 1 || local.values.len() != 1 {
+            return;
+        }
+        let Some(name) = self.pattern_name(&local.bindings[0].pattern) else {
+            return;
+        };
+        let Some(value_type) = self.infer_value_type(&local.values[0]) else {
+            return;
+        };
+        if let Some(scope) = self.value_type_scopes.last_mut() {
+            scope.insert(name.to_string(), value_type);
+        }
+    }
+
+    fn infer_value_type(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Freeze(inner) => self
+                .infer_value_type(inner)
+                .map(|text| self.expand_builtin_type_utility(&format!("Readonly<{text}>")).unwrap_or(text)),
+            Expr::Table(fields) => {
+                let mut typed_fields = Vec::new();
+                for field in fields {
+                    let TableField::Named(name, value) = field else {
+                        return None;
+                    };
+                    let value_type = match value {
+                        Expr::String(_) => "string".to_string(),
+                        Expr::Number(_) => "number".to_string(),
+                        Expr::Bool(_) => "boolean".to_string(),
+                        Expr::Nil => "nil".to_string(),
+                        _ => return None,
+                    };
+                    typed_fields.push((name.clone(), value_type));
+                }
+                Some(self.render_table_type(&typed_fields))
+            }
+            _ => None,
+        }
+    }
+
     fn declare_name(&mut self, name: &str, is_const: bool) {
         if is_const {
             if let Some(scope) = self.const_scopes.last_mut() {
@@ -2328,4 +3076,8 @@ fn compound_token(op: CompoundOp) -> &'static str {
         CompoundOp::Power => "^",
         CompoundOp::Concat => "..",
     }
+}
+
+fn is_type_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }

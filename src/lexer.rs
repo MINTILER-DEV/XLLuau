@@ -90,6 +90,7 @@ pub enum Symbol {
     Percent,
     Caret,
     Pipe,
+    Ampersand,
     Hash,
     DoubleDot,
     Ellipsis,
@@ -392,6 +393,7 @@ impl<'src> Lexer<'src> {
             (Some('%'), _, _) => (TokenKind::Symbol(Symbol::Percent), "%".to_string()),
             (Some('^'), _, _) => (TokenKind::Symbol(Symbol::Caret), "^".to_string()),
             (Some('|'), _, _) => (TokenKind::Symbol(Symbol::Pipe), "|".to_string()),
+            (Some('&'), _, _) => (TokenKind::Symbol(Symbol::Ampersand), "&".to_string()),
             (Some('#'), _, _) => (TokenKind::Symbol(Symbol::Hash), "#".to_string()),
             (Some('?'), _, _) => (TokenKind::Symbol(Symbol::Question), "?".to_string()),
             _ => {
