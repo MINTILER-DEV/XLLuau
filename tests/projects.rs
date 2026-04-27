@@ -88,6 +88,16 @@ fn project_all_features_phase5() {
 }
 
 #[test]
+fn project_object_task() {
+    assert_fixture("object_task", "main.xl");
+}
+
+#[test]
+fn project_all_features_phase6() {
+    assert_fixture("all_features_phase6", "main.xl");
+}
+
+#[test]
 fn project_luau_passthrough() {
     assert_fixture("luau_passthrough", "main.luau");
 }

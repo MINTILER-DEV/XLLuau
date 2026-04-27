@@ -19,6 +19,10 @@ Phase 5 adds fixture projects for:
 - type-system features such as generic constraints, explicit type arguments, utility types, and `freeze`
 - a combined sample that exercises features from phases 1 through 5 together
 
+Phase 6 adds fixture projects for:
+- object blocks with inheritance plus task/spawn syntax
+- a combined sample that exercises features from phases 1 through 6 together
+
 Phase 3 module-system fixtures live under `tests/module_projects/`.
 
 Those fixtures include their own `xluau.config.json` files plus small source trees

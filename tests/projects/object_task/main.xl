@@ -1,0 +1,38 @@
+object Animal
+    name: string
+    sound: string
+
+    function new(name: string, sound: string): Animal
+        self.name = name
+        self.sound = sound
+    end
+
+    function speak(): string
+        return self.sound
+    end
+end
+
+object Dog extends Animal
+    breed: string
+
+    function new(name: string, breed: string): Dog
+        super.new(name, "Woof")
+        self.breed = breed
+    end
+
+    function speak(): string
+        return super.speak(self)
+    end
+end
+
+task function loadDog(name: string): Dog
+    local dog = yield Dog.new(name, "Mixed")
+    return dog
+end
+
+spawn loadDog("Poppy")
+    then |dog|
+        print(dog:speak(), dog.breed)
+    catch |err|
+        warn("load failed", err)
+end

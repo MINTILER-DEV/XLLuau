@@ -40,6 +40,12 @@ These features are implemented and tested in the current Rust compiler:
   - `Parameters`
 - `freeze {}` sugar
 - `readonly` field lowering
+- Object blocks
+- Object inheritance with `extends` and `super`
+- Task functions
+- `yield`
+- `spawn`
+- Roblox task adapter for `spawn`
 - Exhaustiveness checks for:
   - `switch` over literal unions and enums
   - `match` over discriminated unions
@@ -48,8 +54,6 @@ These features are implemented and tested in the current Rust compiler:
 
 These are part of the language design and are documented here so people can learn the intended shape of XLuau, but they are not fully implemented in the current compiler yet:
 
-- Object blocks
-- Task functions
 - Signals
 - Reactive state
 - Pattern literals

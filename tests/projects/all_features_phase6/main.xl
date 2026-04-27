@@ -1,0 +1,62 @@
+type Comparable = number
+type User = {
+    id: number,
+    name: string,
+}
+
+enum Direction
+    North
+    South
+end
+
+object Hero
+    name: string
+    score: number
+
+    function new(name: string, score: number): Hero
+        self.name = name
+        self.score = score
+    end
+
+    function label(): string
+        return self.name
+    end
+end
+
+local function max<T extends Comparable>(a: T, b: T): T
+    return if a > b then a else b
+end
+
+const DEFAULTS = freeze {
+    bonus = 2,
+}
+
+local settings = {}
+local bonus = settings.bonus ?? DEFAULTS.bonus
+local values = { n * 2 for _, n in { 1, 2, 3, 4 } if n > 1 }
+local hero = Hero.new("Ava", max(bonus, 5))
+local who = hero?.name ?? "Guest"
+local style = bonus > 3 ? "bold" : "plain"
+local dir: Direction = Direction.North
+
+task function loadUser(name: string): User
+    local user = yield {
+        id = hero.score,
+        name = name,
+    }
+    return user
+end
+
+spawn loadUser(who)
+    then |user|
+        switch dir
+            case Direction.North
+                print(user.name, style, values[1])
+            case Direction.South
+                print("south")
+        end
+    catch |err|
+        warn(err)
+end
+
+return hero:label(), values

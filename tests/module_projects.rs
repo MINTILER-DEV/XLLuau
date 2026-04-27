@@ -87,3 +87,8 @@ fn module_project_detects_cycle() {
         &["src/a.xl", "src/b.xl", "src/c.xl"],
     );
 }
+
+#[test]
+fn module_project_task_roblox_adapter() {
+    assert_module_fixture("task_roblox_adapter", "src/main.xl");
+}

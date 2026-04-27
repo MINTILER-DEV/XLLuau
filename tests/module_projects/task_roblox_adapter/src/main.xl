@@ -1,0 +1,11 @@
+task function animate(model: Model): Model
+    yield waitForFrame()
+    return model
+end
+
+spawn animate(workspace.Model)
+    then |model|
+        print(model)
+    catch |err|
+        warn(err)
+end

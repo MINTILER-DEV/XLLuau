@@ -1,6 +1,6 @@
 # Objects and Task Functions
 
-Status: designed, not fully implemented in the current compiler
+Status: implemented in the current compiler
 
 This guide documents the intended language design for object blocks and task functions.
 
@@ -19,7 +19,7 @@ Instead:
 - Keep colon methods
 - Remove repeated boilerplate
 
-### Intended Syntax
+### Syntax
 
 ```lua
 object Animal
@@ -51,7 +51,7 @@ It is meant to generate:
 
 The design is intentionally conservative. It is not trying to import a foreign class system into Luau.
 
-### Intended Lowering
+### Lowering
 
 The design lowers to the familiar pattern:
 
@@ -59,7 +59,7 @@ The design lowers to the familiar pattern:
 type Animal = {
     name: string,
     sound: string,
-    speak: (self: Animal) -> string,
+    speak: (Animal) -> string,
 }
 
 local Animal = {}
@@ -77,9 +77,9 @@ function Animal:speak(): string
 end
 ```
 
-### Inheritance Design
+### Inheritance
 
-The spec also describes:
+The current compiler supports:
 
 - `extends`
 - `super.new(...)`
@@ -102,7 +102,7 @@ Object blocks are meant to solve that repetition without changing the underlying
 
 Task functions are intended as coroutine sugar, not JavaScript-style promises.
 
-### Intended Syntax
+### Syntax
 
 ```lua
 task function loadPlayer(id: number): Player
@@ -112,7 +112,7 @@ task function loadPlayer(id: number): Player
 end
 ```
 
-### Intended Meaning
+### Meaning
 
 - `task function` creates coroutine-oriented async work
 - `yield expr` suspends inside a task function
@@ -130,7 +130,7 @@ That means it does not try to hide:
 
 Instead, it tries to make that model easier to write, especially in codebases that already think in coroutines.
 
-### Planned Lowering
+### Lowering
 
 The spec lowers it toward:
 
@@ -157,7 +157,7 @@ spawn loadPlayer(42)
 end
 ```
 
-That is intended to lower into plain coroutine or target-specific scheduling code, not into a hidden promise runtime.
+The current compiler lowers this into plain coroutine control flow for the default adapter, and wraps the same logic in `task.spawn(function() ... end)` when the Roblox task adapter is selected.
 
 ### Why This Matters
 
@@ -172,10 +172,11 @@ The goal is to make coroutine flow readable while staying honest about the runti
 
 ## Practical Advice Today
 
-These features are part of the language design, but they are not fully available in the current compiler yet.
+These features are available today.
 
-If you are writing real code today with this repository:
+A few practical notes:
 
-- Use normal Luau/metatable patterns for objects
-- Use plain Luau or Roblox coroutine/task APIs for async flow
-- Treat this guide as forward-looking language documentation
+- object instance types currently emit method slots as function types such as `(Hero) -> string`
+- `yield` is enforced as task-only syntax by the XLuau compiler
+- the default `spawn` adapter runs through `coroutine.resume`
+- Roblox projects can opt into the task adapter through `taskAdapter: "roblox"` or by targeting Roblox
