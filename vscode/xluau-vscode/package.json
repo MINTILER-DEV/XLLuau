@@ -1,0 +1,67 @@
+{
+  "name": "xluau-vscode",
+  "displayName": "XLuau",
+  "description": "VS Code support for XLuau",
+  "version": "0.1.0",
+  "publisher": "xluau",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:xluau",
+    "onCommand:xluau.restartServer"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "xluau",
+        "aliases": [
+          "XLuau",
+          "xluau"
+        ],
+        "extensions": [
+          ".xl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "xluau",
+        "scopeName": "source.xluau",
+        "path": "./syntaxes/xluau.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "XLuau",
+      "properties": {
+        "xluau.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the xluau-lsp executable."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "xluau.restartServer",
+        "title": "XLuau: Restart Language Server"
+      }
+    ]
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0"
+  }
+}

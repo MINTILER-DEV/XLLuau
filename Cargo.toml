@@ -10,3 +10,4 @@ luau-parser = "0.2.68"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
+url = "2.5.7"

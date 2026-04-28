@@ -1,0 +1,75 @@
+{
+  "scopeName": "source.xluau",
+  "name": "XLuau",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-dash.xluau",
+          "match": "--.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.xluau",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.xluau" }]
+        },
+        {
+          "name": "string.quoted.single.xluau",
+          "begin": "'",
+          "end": "'",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.xluau" }]
+        },
+        {
+          "name": "string.interpolated.backtick.xluau",
+          "begin": "`",
+          "end": "`",
+          "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.xluau" }]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.xluau",
+          "match": "\\b\\d+(?:\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.xluau",
+          "match": "\\b(?:if|then|else|elseif|end|for|in|while|repeat|until|do|switch|case|default|match|object|extends|enum|task|yield|spawn|catch|signal|fire|on|once|state|watch|return|break|continue|fallthrough)\\b"
+        },
+        {
+          "name": "storage.modifier.xluau",
+          "match": "\\b(?:local|const|function|type|export|readonly)\\b"
+        },
+        {
+          "name": "constant.language.xluau",
+          "match": "\\b(?:true|false|nil)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.xluau",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}
