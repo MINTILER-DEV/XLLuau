@@ -31,5 +31,8 @@ Implemented today:
 - `enum`
 - Table comprehensions
 - `do`-expressions
+- `fmt` and `run` CLI commands
+- Baseline LSP diagnostics, formatting, and symbols
+- VS Code language support scaffold
 
-Planned features are also documented, but the docs clearly label what is designed versus what is already implemented.
+Planned features are also documented, and the docs clearly label what is fully implemented today versus what is still roadmap work.

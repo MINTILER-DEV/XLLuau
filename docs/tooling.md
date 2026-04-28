@@ -30,6 +30,74 @@ cargo run -- check
 cargo run -- check src/main.xl
 ```
 
+### Format source files
+
+```bash
+cargo run -- fmt src/
+```
+
+Use `--check` to verify formatting in CI without rewriting files.
+
+### Run an entry file
+
+```bash
+cargo run -- run src/main.xl
+```
+
+This builds the selected entry, writes the emitted `.luau`, and launches a Luau runtime command.
+
+## Language Server
+
+The repository now ships a baseline language server as the `xluau-lsp` binary.
+
+### Build it
+
+```bash
+cargo build --bin xluau-lsp
+```
+
+### Current LSP features
+
+- parse and validation diagnostics for open `.xl` files
+- document formatting through the same formatter used by `xluau fmt`
+- top-level document symbols for functions, objects, enums, signals, state, and type aliases
+
+### Current LSP limits
+
+- no completions yet
+- no hover yet
+- no go-to-definition yet
+- no rename yet
+- no code actions yet
+
+## VS Code Extension
+
+A VS Code client lives under `vscode/xluau-vscode`.
+
+### What it provides today
+
+- `.xl` language registration
+- syntax highlighting
+- bracket and comment configuration
+- diagnostics, formatting, and symbols through `xluau-lsp`
+- a `xluau.restartServer` command
+
+### Local development
+
+```bash
+cargo build --bin xluau-lsp
+cd vscode/xluau-vscode
+npm install
+```
+
+Then open the extension folder in VS Code and press `F5`.
+
+### Current extension limits
+
+- the server is launched from your local build output or `PATH`
+- the extension does not bundle platform binaries yet
+- file icons and task definitions are not added yet
+
 ## File Extensions
 
 - `.xl`: XLuau source
@@ -87,10 +155,18 @@ require(resolveModule("shared/math"))
 
 1. Write `.xl` files under `src/`.
 2. Keep reusable modules under aliased folders like `src/shared`.
-3. Run `cargo run -- check` while iterating.
-4. Run `cargo run -- build` when you want emitted output.
-5. Treat `out/` as generated code.
+3. Run `cargo run -- fmt --check` or `cargo run -- fmt` before commits.
+4. Run `cargo run -- check` while iterating.
+5. Run `cargo run -- build` when you want emitted output.
+6. Use `cargo run -- run ...` when you want a compile-and-execute shortcut.
+7. Treat `out/` as generated code.
 
 ## What Is Still Planned
 
-The spec also describes future tooling like watch mode, LSP, and editor integrations. Those are part of the language roadmap, but they are not all present in the current codebase yet.
+The remaining phase 9 work is mostly editor depth:
+
+- semantic completions
+- hover and definition navigation
+- cross-file rename
+- code actions
+- richer VS Code packaging

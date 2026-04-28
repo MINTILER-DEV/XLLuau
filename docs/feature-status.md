@@ -60,12 +60,28 @@ These features are implemented and tested in the current Rust compiler:
 - Source maps and line pragmas
 - `xluau remap`
 - `build --watch` and `check --watch`
+- `xluau fmt`
+- `xluau run`
+- `xluau-lsp` diagnostics
+- `xluau-lsp` document formatting
+- `xluau-lsp` document symbols
+- `xluau-vscode` syntax highlighting and LSP client wiring
 
 ## Designed but Not Yet Implemented
 
 These are part of the language design and are documented here so people can learn the intended shape of XLuau, but they are not fully implemented in the current compiler yet:
 
-- LSP and editor tooling described in the spec
+- Advanced LSP/editor features described in the spec:
+  - completions
+  - hover
+  - go to definition
+  - rename
+  - code actions
+- Full VS Code packaging details from the spec:
+  - bundled `xluau-lsp`
+  - file icons
+  - task definitions
+  - sourcemap-aware editor UX
 
 ## How to Read the Guides
 

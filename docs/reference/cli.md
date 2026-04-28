@@ -7,6 +7,8 @@ This page documents the CLI supported by the current repository.
 ```bash
 xluau build [path] [--watch]
 xluau check [path] [--watch]
+xluau fmt [path] [--check]
+xluau run <path> [--runtime <cmd>] [args...]
 xluau remap <stacktrace>
 ```
 
@@ -86,6 +88,62 @@ Translate Luau stack traces back to XLuau source locations by consulting adjacen
 cargo run -- remap stacktrace.txt
 ```
 
+## `fmt`
+
+Format XLuau and Luau source files in place.
+
+### Format a whole project tree
+
+```bash
+cargo run -- fmt
+```
+
+### Format a directory
+
+```bash
+cargo run -- fmt tests/projects
+```
+
+### Format one file
+
+```bash
+cargo run -- fmt src/main.xl
+```
+
+### Check formatting without rewriting files
+
+```bash
+cargo run -- fmt --check
+```
+
+## `run`
+
+Compile an entry file and execute the emitted Luau with a runtime command.
+
+### Run a source file directly
+
+```bash
+cargo run -- run src/main.xl
+```
+
+### Run a project directory
+
+```bash
+cargo run -- run tests/module_projects/custom_alias
+```
+
+### Override the runtime executable
+
+```bash
+cargo run -- run src/main.xl --runtime luau
+```
+
+### Pass arguments through to the runtime
+
+```bash
+cargo run -- run src/main.xl -- --flag value
+```
+
 ## Current Behavior
 
 - If `path` is omitted, uses the current working directory as the project root
@@ -99,3 +157,8 @@ cargo run -- remap stacktrace.txt
 - Validates generated Luau
 - Reports semantic and parsing errors
 - Polls for file changes when `--watch` is enabled
+- `fmt` formats `.xl`, `.luau`, and `.lua` files
+- `fmt --check` reports files that need formatting and exits non-zero
+- `run` resolves entry files from a source file, a project directory, or a config path
+- `run` looks for `src/main.xl`, `src/main.luau`, `main.xl`, then `main.luau` when given a project path
+- `run` uses `--runtime`, then `XLUAU_RUNTIME`, then `luau`
