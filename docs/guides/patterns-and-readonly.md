@@ -59,11 +59,13 @@ const DEFAULTS = freeze {
 
 The current compiler supports:
 
-- compile-time immutability intent
+- target-specific readonly field emit
 - `freeze { ... }` lowering to `table.freeze({ ... })`
 - utility-type expansion such as `Readonly<typeof(DEFAULTS)>`
 
-For compatibility with the Luau validator used in this repository, emitted type fields currently stay in ordinary `name: Type` form instead of using newer `read` field syntax.
+On `new-solver` targets, readonly fields emit with Luau's `read` property syntax.
+
+On `legacy` targets, readonly fields emit as normal fields plus an `-- @readonly (XLuau-enforced)` annotation comment so the emitted code stays compatible while XLuau preserves the source-level immutability intent.
 
 ## Why These Features Exist
 
@@ -77,4 +79,4 @@ more obvious in code.
 
 ## Practical Advice Today
 
-Use `freeze { ... }` when you want the runtime table frozen, and use `Readonly<T>` or readonly field declarations to make the source intent clear in XLuau code.
+Use `freeze { ... }` when you want the runtime table frozen, and use `Readonly<T>` or readonly field declarations when you want that immutability reflected in the inferred type as well.

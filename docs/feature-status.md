@@ -39,7 +39,7 @@ These features are implemented and tested in the current Rust compiler:
   - `ReturnType`
   - `Parameters`
 - `freeze {}` sugar
-- `readonly` field lowering
+- `readonly` field lowering for `new-solver` and `legacy` targets
 - Object blocks
 - Object inheritance with `extends` and `super`
 - Task functions

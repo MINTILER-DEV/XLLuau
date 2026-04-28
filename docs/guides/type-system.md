@@ -94,6 +94,8 @@ The current compiler supports a family of utility helpers such as:
 
 These are documented as language-level conveniences over common Luau type transforms.
 
+They can be composed with each other, named type aliases, `typeof(...)` value types, and known function signatures such as regular functions and object constructors/method tables that XLuau emits.
+
 ### Why Utility Types Matter
 
 They capture transforms developers already think about constantly:
@@ -111,7 +113,8 @@ The goal is not to build a completely separate type language. The goal is to mak
 
 The current compiler now lowers the phase 5 type-system syntax in `.xl` files.
 
-Two practical notes:
+Practical notes:
 
-- utility-type expansion is strongest when it can see a concrete table shape or a known function signature
-- `readonly` lowers as compile-time intent today, while emitted Luau stays compatible with the validator used by this repository
+- `readonly` field declarations emit `read field: Type` on `new-solver` targets
+- `readonly` field declarations emit `field: Type,  -- @readonly (XLuau-enforced)` on `legacy` targets
+- `freeze { ... }` lowers to `table.freeze(...)` and XLuau preserves readonly field information in the inferred table type

@@ -59,7 +59,7 @@ The design lowers to the familiar pattern:
 type Animal = {
     name: string,
     sound: string,
-    speak: (Animal) -> string,
+    speak: (self: Animal) -> string,
 }
 
 local Animal = {}
@@ -176,7 +176,7 @@ These features are available today.
 
 A few practical notes:
 
-- object instance types currently emit method slots as function types such as `(Hero) -> string`
+- object instance types emit method slots in explicit `self` form such as `(self: Hero) -> string`
 - `yield` is enforced as task-only syntax by the XLuau compiler
 - the default `spawn` adapter runs through `coroutine.resume`
 - Roblox projects can opt into the task adapter through `taskAdapter: "roblox"` or by targeting Roblox
