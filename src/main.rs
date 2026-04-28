@@ -1,11 +1,14 @@
 use std::{
+    fs,
     io,
     path::{Path, PathBuf},
     process::ExitCode,
+    thread,
+    time::{Duration, SystemTime},
 };
 
-use clap::{Parser, Subcommand};
-use xluau::compiler::Compiler;
+use clap::{Args, Parser, Subcommand};
+use xluau::{compiler::Compiler, source_map::remap_trace};
 
 #[derive(Debug, Parser)]
 #[command(name = "xluau")]
@@ -17,8 +20,23 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Build { path: Option<PathBuf> },
-    Check { path: Option<PathBuf> },
+    Build(BuildArgs),
+    Check(CheckArgs),
+    Remap { stacktrace: PathBuf },
+}
+
+#[derive(Debug, Clone, Args)]
+struct BuildArgs {
+    path: Option<PathBuf>,
+    #[arg(long)]
+    watch: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct CheckArgs {
+    path: Option<PathBuf>,
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,8 +68,12 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     match cli.command {
-        Command::Build { path } => run_operation(Operation::Build, path, &cwd)?,
-        Command::Check { path } => run_operation(Operation::Check, path, &cwd)?,
+        Command::Build(args) => run_operation(Operation::Build, args.path, args.watch, &cwd)?,
+        Command::Check(args) => run_operation(Operation::Check, args.path, args.watch, &cwd)?,
+        Command::Remap { stacktrace } => {
+            let trace = fs::read_to_string(&stacktrace)?;
+            println!("{}", remap_trace(&trace, &cwd));
+        }
     }
     Ok(())
 }
@@ -59,11 +81,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn run_operation(
     operation: Operation,
     path: Option<PathBuf>,
+    watch: bool,
     cwd: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match resolve_invocation_target(path, cwd)? {
+    let target = resolve_invocation_target(path, cwd)?;
+    run_operation_once(operation, &target)?;
+    if watch {
+        watch_operation(operation, target)?;
+    }
+    Ok(())
+}
+
+fn run_operation_once(
+    operation: Operation,
+    target: &InvocationTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match target {
         InvocationTarget::ProjectRoot(root) => {
-            let compiler = Compiler::discover(&root)?;
+            let compiler = Compiler::discover(root)?;
             for artifact in compiler.build_project()? {
                 match operation {
                     Operation::Build => {
@@ -88,8 +123,8 @@ fn run_operation(
             compiler_root,
             file_path,
         } => {
-            let compiler = Compiler::discover(&compiler_root)?;
-            let artifact = compiler.build_file(&file_path)?;
+            let compiler = Compiler::discover(compiler_root)?;
+            let artifact = compiler.build_file(file_path)?;
             match operation {
                 Operation::Build => {
                     compiler.write_artifact(&artifact)?;
@@ -110,6 +145,25 @@ fn run_operation(
         }
     }
     Ok(())
+}
+
+fn watch_operation(
+    operation: Operation,
+    target: InvocationTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut previous = snapshot_watch_state(&target)?;
+    loop {
+        thread::sleep(Duration::from_millis(750));
+        let current = snapshot_watch_state(&target)?;
+        if current == previous {
+            continue;
+        }
+        previous = current;
+        match run_operation_once(operation, &target) {
+            Ok(()) => {}
+            Err(error) => eprintln!("{error}"),
+        }
+    }
 }
 
 fn resolve_invocation_target(
@@ -168,6 +222,64 @@ fn is_config_path(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .map(|name| name.eq_ignore_ascii_case("xluau.config.json"))
         .unwrap_or(false)
+}
+
+fn snapshot_watch_state(
+    target: &InvocationTarget,
+) -> Result<Vec<(PathBuf, Option<SystemTime>)>, Box<dyn std::error::Error>> {
+    let root = match target {
+        InvocationTarget::ProjectRoot(root) => root.clone(),
+        InvocationTarget::SingleFile {
+            compiler_root,
+            file_path,
+        } => {
+            let mut files = vec![file_path.clone()];
+            let config = compiler_root.join("xluau.config.json");
+            if config.is_file() {
+                files.push(config);
+            }
+            return Ok(snapshot_files(files));
+        }
+    };
+    let mut files = Vec::new();
+    collect_watch_files(&root, &mut files)?;
+    Ok(snapshot_files(files))
+}
+
+fn collect_watch_files(
+    root: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if root.is_file() {
+        files.push(root.to_path_buf());
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_watch_files(&path, files)?;
+            continue;
+        }
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        if matches!(ext, "xl" | "luau" | "lua" | "json") || name == "xluau.config.json" {
+            files.push(path);
+        }
+    }
+
+    files.sort();
+    Ok(())
+}
+
+fn snapshot_files(files: Vec<PathBuf>) -> Vec<(PathBuf, Option<SystemTime>)> {
+    files.into_iter()
+        .map(|path| {
+            let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            (path, modified)
+        })
+        .collect()
 }
 
 #[cfg(test)]

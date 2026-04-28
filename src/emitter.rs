@@ -3,12 +3,15 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     ast::*,
     compiler::{CompilerError, Result},
+    lexer::Span,
 };
 
 pub struct Emitter {
     temp_counter: usize,
     luau_target: String,
     spawn_uses_roblox: bool,
+    source_path: Option<String>,
+    emit_line_pragmas: bool,
     const_scopes: Vec<HashSet<String>>,
     type_scopes: Vec<HashMap<String, String>>,
     function_scopes: Vec<HashMap<String, FunctionSignature>>,
@@ -95,14 +98,21 @@ enum TypeRenderMode {
 
 impl Emitter {
     pub fn new() -> Self {
-        Self::with_options("new-solver", false)
+        Self::with_options("new-solver", false, None, false)
     }
 
-    pub fn with_options(luau_target: impl Into<String>, spawn_uses_roblox: bool) -> Self {
+    pub fn with_options(
+        luau_target: impl Into<String>,
+        spawn_uses_roblox: bool,
+        source_path: Option<String>,
+        emit_line_pragmas: bool,
+    ) -> Self {
         Self {
             temp_counter: 0,
             luau_target: luau_target.into(),
             spawn_uses_roblox,
+            source_path,
+            emit_line_pragmas,
             const_scopes: vec![HashSet::new()],
             type_scopes: vec![HashMap::new()],
             function_scopes: vec![HashMap::new()],
@@ -150,7 +160,7 @@ impl Emitter {
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt, indent: usize) -> Result<String> {
-        match stmt {
+        let emitted = match stmt {
             Stmt::Local(local) => self.emit_local(local, indent),
             Stmt::State(state) => self.emit_state_decl(state, indent),
             Stmt::Function(function) => self.emit_function_stmt(function, indent),
@@ -164,28 +174,34 @@ impl Emitter {
             Stmt::SignalHandler(handler) => self.emit_signal_handler_stmt(handler, indent),
             Stmt::Watch(watch) => self.emit_watch_stmt(watch, indent),
             Stmt::Assignment(assignment) => self.emit_assignment(assignment, indent),
-            Stmt::CompoundAssignment { target, op, value } => {
+            Stmt::CompoundAssignment {
+                target, op, value, ..
+            } => {
                 self.emit_compound_assignment(target, *op, value, indent)
             }
-            Stmt::NullishAssignment { target, value } => {
+            Stmt::NullishAssignment { target, value, .. } => {
                 self.emit_nullish_assignment(target, value, indent)
             }
-            Stmt::Call(expr) => {
+            Stmt::Call(expr, _) => {
                 let lowered = self.emit_expr(expr, None)?;
                 let mut parts = Vec::new();
                 self.push_setup(&mut parts, indent, lowered.setup);
                 parts.push(self.indent(indent, &lowered.expr));
                 Ok(parts.join("\n"))
             }
-            Stmt::Return(values) => self.emit_return(values, indent),
+            Stmt::Return(values, _) => self.emit_return(values, indent),
             Stmt::If(if_stmt) => self.emit_if_stmt(if_stmt, indent),
             Stmt::Switch(switch_stmt) => self.emit_switch_stmt(switch_stmt, indent),
             Stmt::Match(match_stmt) => self.emit_match_stmt(match_stmt, indent),
-            Stmt::While { condition, block } => self.emit_while_stmt(condition, block, indent),
-            Stmt::Repeat { block, condition } => self.emit_repeat_stmt(block, condition, indent),
+            Stmt::While(while_stmt) => {
+                self.emit_while_stmt(&while_stmt.condition, &while_stmt.block, indent)
+            }
+            Stmt::Repeat(repeat_stmt) => {
+                self.emit_repeat_stmt(&repeat_stmt.block, &repeat_stmt.condition, indent)
+            }
             Stmt::ForNumeric(for_numeric) => self.emit_for_numeric(for_numeric, indent),
             Stmt::ForGeneric(for_generic) => self.emit_for_generic(for_generic, indent),
-            Stmt::Do(block) => {
+            Stmt::Do(block, _) => {
                 let inner = self.emit_block(block, indent + 1)?;
                 Ok(format!(
                     "{}\n{}\n{}",
@@ -194,9 +210,9 @@ impl Emitter {
                     self.indent(indent, "end")
                 ))
             }
-            Stmt::Break => Ok(self.indent(indent, "break")),
-            Stmt::Continue => Ok(self.indent(indent, "continue")),
-            Stmt::Fallthrough => {
+            Stmt::Break(_) => Ok(self.indent(indent, "break")),
+            Stmt::Continue(_) => Ok(self.indent(indent, "continue")),
+            Stmt::Fallthrough(_) => {
                 self.errors.push(
                     "`fallthrough` is only valid as the last statement in a switch case"
                         .to_string(),
@@ -204,12 +220,29 @@ impl Emitter {
                 Ok(String::new())
             }
             Stmt::Spawn(spawn) => self.emit_spawn_stmt(spawn, indent),
-            Stmt::TypeAlias { raw } => {
+            Stmt::TypeAlias { raw, .. } => {
                 self.register_type_alias(raw);
                 let rewritten = self.rewrite_type_alias(raw);
                 Ok(self.indent(indent, &rewritten))
             }
+        }?;
+
+        if emitted.is_empty() {
+            return Ok(emitted);
         }
+
+        if self.emit_line_pragmas
+            && let Some(source_path) = &self.source_path
+            && let Some(span) = self.stmt_span(stmt)
+        {
+            return Ok(format!(
+                "{}\n{}",
+                self.indent(indent, &format!("--@line {} \"{}\"", span.line, source_path)),
+                emitted
+            ));
+        }
+
+        Ok(emitted)
     }
 
     fn emit_local(&mut self, local: &LocalDecl, indent: usize) -> Result<String> {
@@ -926,7 +959,7 @@ impl Emitter {
         if !body.is_empty() {
             parts.push(body);
         }
-        if !matches!(body_slice.last(), Some(Stmt::Return(_))) {
+        if !matches!(body_slice.last(), Some(Stmt::Return(_, _))) {
             parts.push(self.indent(indent + 1, "return self"));
         }
         parts.push(self.indent(indent, "end"));
@@ -999,7 +1032,7 @@ impl Emitter {
     }
 
     fn extract_super_constructor_args(&self, stmt: &Stmt) -> Option<Vec<Expr>> {
-        let Stmt::Call(Expr::Chain { base, segments }) = stmt else {
+        let Stmt::Call(Expr::Chain { base, segments }, _) = stmt else {
             return None;
         };
         if !matches!(&**base, Expr::Name(name) if name == "super") {
@@ -1834,6 +1867,7 @@ impl Emitter {
             Expr::Nil => Ok(self.simple_expr("nil", true)),
             Expr::Bool(value) => Ok(self.simple_expr(if *value { "true" } else { "false" }, true)),
             Expr::Number(value) | Expr::String(value) => Ok(self.simple_expr(value, true)),
+            Expr::Pattern(value) => Ok(self.simple_expr(&self.compile_pattern_literal(value)?, true)),
             Expr::VarArg => Ok(self.simple_expr("...", true)),
             Expr::Name(name) if placeholder.is_some() && name == "_" => {
                 Ok(self.simple_expr(placeholder.unwrap(), true))
@@ -2798,7 +2832,7 @@ impl Emitter {
                 Stmt::Function(function) => self.register_function_signature(function),
                 Stmt::Object(object) => self.register_object_signatures(object),
                 Stmt::Enum(decl) => self.register_enum_type(decl),
-                Stmt::TypeAlias { raw } => {
+                Stmt::TypeAlias { raw, .. } => {
                     self.register_type_alias(raw);
                 }
                 _ => {}
@@ -3965,6 +3999,7 @@ impl Emitter {
             | Expr::Bool(_)
             | Expr::Number(_)
             | Expr::String(_)
+            | Expr::Pattern(_)
             | Expr::VarArg => false,
         }
     }
@@ -4075,7 +4110,7 @@ impl Emitter {
                         return None;
                     };
                     let value_type = match value {
-                        Expr::String(_) => "string".to_string(),
+                        Expr::String(_) | Expr::Pattern(_) => "string".to_string(),
                         Expr::Number(_) => "number".to_string(),
                         Expr::Bool(_) => "boolean".to_string(),
                         Expr::Nil => "nil".to_string(),
@@ -4116,6 +4151,85 @@ impl Emitter {
             expr: expr.into(),
             reuse_safe,
         }
+    }
+
+    fn stmt_span(&self, stmt: &Stmt) -> Option<Span> {
+        Some(match stmt {
+            Stmt::Local(local) => local.span,
+            Stmt::State(state) => state.span,
+            Stmt::Function(function) => function.span,
+            Stmt::Object(object) => object.span,
+            Stmt::Enum(decl) => decl.span,
+            Stmt::Signal(signal) => signal.span,
+            Stmt::Fire(fire) => fire.span,
+            Stmt::SignalHandler(handler) => handler.span,
+            Stmt::Watch(watch) => watch.span,
+            Stmt::Assignment(assignment) => assignment.span,
+            Stmt::CompoundAssignment { span, .. } => *span,
+            Stmt::NullishAssignment { span, .. } => *span,
+            Stmt::Call(_, span) => *span,
+            Stmt::Return(_, span) => *span,
+            Stmt::If(if_stmt) => if_stmt.span,
+            Stmt::Switch(switch_stmt) => switch_stmt.span,
+            Stmt::Match(match_stmt) => match_stmt.span,
+            Stmt::While(while_stmt) => while_stmt.span,
+            Stmt::Repeat(repeat_stmt) => repeat_stmt.span,
+            Stmt::ForNumeric(for_numeric) => for_numeric.span,
+            Stmt::ForGeneric(for_generic) => for_generic.span,
+            Stmt::Do(_, span) => *span,
+            Stmt::Break(span) => *span,
+            Stmt::Continue(span) => *span,
+            Stmt::Fallthrough(span) => *span,
+            Stmt::Spawn(spawn) => spawn.span,
+            Stmt::TypeAlias { span, .. } => *span,
+        })
+    }
+
+    fn compile_pattern_literal(&self, raw: &str) -> Result<String> {
+        let Some(inner) = raw.strip_prefix('`').and_then(|text| text.strip_suffix('`')) else {
+            return Err(CompilerError::Semantic {
+                messages: vec!["pattern literals must use backtick quotes".to_string()],
+            });
+        };
+
+        let mut compiled = String::new();
+        let chars: Vec<char> = inner.chars().collect();
+        let mut index = 0usize;
+        while index < chars.len() {
+            if chars[index] == '{' {
+                let start = index + 1;
+                index += 1;
+                while index < chars.len() && chars[index] != '}' {
+                    index += 1;
+                }
+                if index >= chars.len() {
+                    return Err(CompilerError::Semantic {
+                        messages: vec!["unterminated pattern capture".to_string()],
+                    });
+                }
+                let capture = chars[start..index].iter().collect::<String>();
+                let pattern = capture
+                    .split_once(':')
+                    .map(|(_, body)| body.trim())
+                    .unwrap_or_else(|| capture.trim());
+                if pattern.is_empty() {
+                    return Err(CompilerError::Semantic {
+                        messages: vec!["pattern capture cannot be empty".to_string()],
+                    });
+                }
+                compiled.push('(');
+                compiled.push_str(pattern);
+                compiled.push(')');
+                index += 1;
+                continue;
+            }
+            compiled.push(chars[index]);
+            index += 1;
+        }
+
+        serde_json::to_string(&compiled).map_err(|error| {
+            CompilerError::Other(format!("failed to encode pattern literal: {error}"))
+        })
     }
 
     fn next_temp(&mut self, prefix: &str) -> String {

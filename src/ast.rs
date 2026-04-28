@@ -1,3 +1,5 @@
+use crate::lexer::Span;
+
 #[derive(Debug, Clone)]
 pub struct Program {
     pub block: Block,
@@ -18,47 +20,46 @@ pub enum Stmt {
     Watch(WatchStmt),
     Assignment(Assignment),
     CompoundAssignment {
+        span: Span,
         target: AssignTarget,
         op: CompoundOp,
         value: Expr,
     },
     NullishAssignment {
+        span: Span,
         target: AssignTarget,
         value: Expr,
     },
-    Call(Expr),
-    Return(Vec<Expr>),
+    Call(Expr, Span),
+    Return(Vec<Expr>, Span),
     If(IfStmt),
     Switch(SwitchStmt),
     Match(MatchStmt),
-    While {
-        condition: Expr,
-        block: Block,
-    },
-    Repeat {
-        block: Block,
-        condition: Expr,
-    },
+    While(WhileStmt),
+    Repeat(RepeatStmt),
     ForNumeric(ForNumeric),
     ForGeneric(ForGeneric),
-    Do(Block),
-    Break,
-    Continue,
-    Fallthrough,
+    Do(Block, Span),
+    Break(Span),
+    Continue(Span),
+    Fallthrough(Span),
     Spawn(SpawnStmt),
     TypeAlias {
         raw: String,
+        span: Span,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct StateDecl {
+    pub span: Span,
     pub binding: Binding,
     pub value: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SignalDecl {
+    pub span: Span,
     pub name: String,
     pub params: Vec<SignalParam>,
 }
@@ -71,12 +72,14 @@ pub struct SignalParam {
 
 #[derive(Debug, Clone)]
 pub struct FireStmt {
+    pub span: Span,
     pub signal: Expr,
     pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SignalHandlerStmt {
+    pub span: Span,
     pub signal: Expr,
     pub params: Vec<String>,
     pub body: Block,
@@ -85,6 +88,7 @@ pub struct SignalHandlerStmt {
 
 #[derive(Debug, Clone)]
 pub struct WatchStmt {
+    pub span: Span,
     pub name: String,
     pub params: Vec<String>,
     pub body: Block,
@@ -92,6 +96,7 @@ pub struct WatchStmt {
 
 #[derive(Debug, Clone)]
 pub struct ObjectDecl {
+    pub span: Span,
     pub name: String,
     pub extends: Option<String>,
     pub fields: Vec<ObjectField>,
@@ -116,6 +121,7 @@ pub struct ObjectMethod {
 
 #[derive(Debug, Clone)]
 pub struct SpawnStmt {
+    pub span: Span,
     pub call: Expr,
     pub then_handler: Option<SpawnHandler>,
     pub catch_handler: Option<SpawnHandler>,
@@ -129,6 +135,7 @@ pub struct SpawnHandler {
 
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
+    pub span: Span,
     pub name: String,
     pub base_type: Option<String>,
     pub members: Vec<EnumMember>,
@@ -142,6 +149,7 @@ pub struct EnumMember {
 
 #[derive(Debug, Clone)]
 pub struct LocalDecl {
+    pub span: Span,
     pub is_const: bool,
     pub bindings: Vec<Binding>,
     pub values: Vec<Expr>,
@@ -185,6 +193,7 @@ pub struct PatternBinding {
 
 #[derive(Debug, Clone)]
 pub struct Assignment {
+    pub span: Span,
     pub targets: Vec<AssignTarget>,
     pub values: Vec<Expr>,
 }
@@ -198,6 +207,7 @@ pub enum AssignTarget {
 
 #[derive(Debug, Clone)]
 pub struct FunctionDecl {
+    pub span: Span,
     pub local_name: bool,
     pub is_task: bool,
     pub name: FunctionName,
@@ -222,12 +232,14 @@ pub enum Param {
 
 #[derive(Debug, Clone)]
 pub struct IfStmt {
+    pub span: Span,
     pub branches: Vec<(Expr, Block)>,
     pub else_block: Option<Block>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SwitchStmt {
+    pub span: Span,
     pub value: Expr,
     pub cases: Vec<SwitchCase>,
     pub default: Option<Block>,
@@ -242,6 +254,7 @@ pub struct SwitchCase {
 
 #[derive(Debug, Clone)]
 pub struct MatchStmt {
+    pub span: Span,
     pub value: Expr,
     pub cases: Vec<MatchCase>,
 }
@@ -251,6 +264,20 @@ pub struct MatchCase {
     pub pattern: MatchPattern,
     pub guard: Option<Expr>,
     pub block: Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhileStmt {
+    pub span: Span,
+    pub condition: Expr,
+    pub block: Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepeatStmt {
+    pub span: Span,
+    pub block: Block,
+    pub condition: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +295,7 @@ pub struct MatchFieldPattern {
 
 #[derive(Debug, Clone)]
 pub struct ForNumeric {
+    pub span: Span,
     pub name: String,
     pub start: Expr,
     pub end: Expr,
@@ -277,6 +305,7 @@ pub struct ForNumeric {
 
 #[derive(Debug, Clone)]
 pub struct ForGeneric {
+    pub span: Span,
     pub bindings: Vec<Binding>,
     pub iterables: Vec<Expr>,
     pub block: Block,
@@ -288,6 +317,7 @@ pub enum Expr {
     Bool(bool),
     Number(String),
     String(String),
+    Pattern(String),
     VarArg,
     Name(String),
     Table(Vec<TableField>),

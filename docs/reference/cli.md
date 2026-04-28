@@ -5,8 +5,9 @@ This page documents the CLI supported by the current repository.
 ## Command Overview
 
 ```bash
-xluau build [path]
-xluau check [path]
+xluau build [path] [--watch]
+xluau check [path] [--watch]
+xluau remap <stacktrace>
 ```
 
 ## `build`
@@ -37,6 +38,12 @@ cargo run -- build tests/module_projects/custom_alias/xluau.config.json
 cargo run -- build src/main.xl
 ```
 
+### Watch for changes
+
+```bash
+cargo run -- build --watch
+```
+
 ## `check`
 
 Compile and validate without writing output files.
@@ -65,6 +72,20 @@ cargo run -- check tests/module_projects/custom_alias/xluau.config.json
 cargo run -- check src/main.xl
 ```
 
+### Watch while checking
+
+```bash
+cargo run -- check --watch
+```
+
+## `remap`
+
+Translate Luau stack traces back to XLuau source locations by consulting adjacent `.luau.map` files.
+
+```bash
+cargo run -- remap stacktrace.txt
+```
+
 ## Current Behavior
 
 - If `path` is omitted, uses the current working directory as the project root
@@ -74,9 +95,7 @@ cargo run -- check src/main.xl
 - Falls back to the current working directory if a single-file build does not live inside a discovered project
 - Builds matching files for project builds
 - Writes output under `outDir` for `build`
+- Writes `.luau.map` files when `sourceMaps` is enabled
 - Validates generated Luau
 - Reports semantic and parsing errors
-
-## Planned CLI Features
-
-The spec also discusses future tooling like watch mode and richer editor integration. Those are part of the language roadmap, but not all are available in the current CLI yet.
+- Polls for file changes when `--watch` is enabled

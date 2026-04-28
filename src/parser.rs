@@ -38,91 +38,113 @@ impl<'src> Parser<'src> {
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
         if self.match_keyword(Keyword::Local) {
+            let start = self.previous().span;
             if self.match_keyword(Keyword::Function) {
-                return self.parse_function_stmt(true, false);
+                return self.parse_function_stmt(true, false, start);
             }
-            return self.parse_local_decl(false);
+            return self.parse_local_decl(false, start);
         }
         if self.match_keyword(Keyword::Const) {
-            return self.parse_local_decl(true);
+            let start = self.previous().span;
+            return self.parse_local_decl(true, start);
         }
         if self.match_keyword(Keyword::State) {
-            return self.parse_state_decl();
+            let start = self.previous().span;
+            return self.parse_state_decl(start);
         }
         if self.match_keyword(Keyword::Function) {
-            return self.parse_function_stmt(false, false);
+            let start = self.previous().span;
+            return self.parse_function_stmt(false, false, start);
         }
         if self.match_keyword(Keyword::Task) {
+            let start = self.previous().span;
             self.expect_keyword(Keyword::Function)?;
-            return self.parse_function_stmt(true, true);
+            return self.parse_function_stmt(true, true, start);
         }
         if self.match_keyword(Keyword::Object) {
-            return self.parse_object_stmt();
+            let start = self.previous().span;
+            return self.parse_object_stmt(start);
         }
         if self.match_keyword(Keyword::Enum) {
-            return self.parse_enum_stmt();
+            let start = self.previous().span;
+            return self.parse_enum_stmt(start);
         }
         if self.match_keyword(Keyword::Signal) {
-            return self.parse_signal_stmt();
+            let start = self.previous().span;
+            return self.parse_signal_stmt(start);
         }
         if self.match_keyword(Keyword::If) {
-            return self.parse_if_stmt();
+            let start = self.previous().span;
+            return self.parse_if_stmt(start);
         }
         if self.match_keyword(Keyword::Switch) {
-            return self.parse_switch_stmt();
+            let start = self.previous().span;
+            return self.parse_switch_stmt(start);
         }
         if self.match_keyword(Keyword::Match) {
-            return self.parse_match_stmt();
+            let start = self.previous().span;
+            return self.parse_match_stmt(start);
         }
         if self.match_keyword(Keyword::While) {
-            return self.parse_while_stmt();
+            let start = self.previous().span;
+            return self.parse_while_stmt(start);
         }
         if self.match_keyword(Keyword::Repeat) {
-            return self.parse_repeat_stmt();
+            let start = self.previous().span;
+            return self.parse_repeat_stmt(start);
         }
         if self.match_keyword(Keyword::For) {
-            return self.parse_for_stmt();
+            let start = self.previous().span;
+            return self.parse_for_stmt(start);
         }
         if self.match_keyword(Keyword::Do) {
+            let span = self.previous().span;
             let block = self.parse_block(&[Keyword::End])?;
             self.expect_keyword(Keyword::End)?;
-            return Ok(Stmt::Do(block));
+            return Ok(Stmt::Do(block, span));
         }
         if self.match_keyword(Keyword::Return) {
+            let span = self.previous().span;
             let values = if self.check_block_end() {
                 Vec::new()
             } else {
                 self.parse_expr_list()?
             };
-            return Ok(Stmt::Return(values));
+            return Ok(Stmt::Return(values, span));
         }
         if self.match_keyword(Keyword::Break) {
-            return Ok(Stmt::Break);
+            return Ok(Stmt::Break(self.previous().span));
         }
         if self.match_keyword(Keyword::Continue) {
-            return Ok(Stmt::Continue);
+            return Ok(Stmt::Continue(self.previous().span));
         }
         if self.match_keyword(Keyword::Fallthrough) {
-            return Ok(Stmt::Fallthrough);
+            return Ok(Stmt::Fallthrough(self.previous().span));
         }
         if self.match_keyword(Keyword::Fire) {
-            return self.parse_fire_stmt();
+            let start = self.previous().span;
+            return self.parse_fire_stmt(start);
         }
         if self.match_keyword(Keyword::On) {
-            return self.parse_signal_handler_stmt(false);
+            let start = self.previous().span;
+            return self.parse_signal_handler_stmt(false, start);
         }
         if self.match_keyword(Keyword::Once) {
-            return self.parse_signal_handler_stmt(true);
+            let start = self.previous().span;
+            return self.parse_signal_handler_stmt(true, start);
         }
         if self.match_keyword(Keyword::Watch) {
-            return self.parse_watch_stmt();
+            let start = self.previous().span;
+            return self.parse_watch_stmt(start);
         }
         if self.match_keyword(Keyword::Yield) {
+            let span = self.previous().span;
             let expr = self.parse_expr()?;
-            return Ok(Stmt::Call(Expr::Yield(Box::new(expr))));
+            return Ok(Stmt::Call(Expr::Yield(Box::new(expr)), span));
         }
         if self.match_keyword(Keyword::Spawn) {
-            return self.parse_spawn_stmt();
+            let start = self.previous().span;
+            return self.parse_spawn_stmt(start);
         }
         if self.check_keyword(Keyword::Type)
             || (self.check_keyword(Keyword::Export) && self.check_keyword_at(1, Keyword::Type))
@@ -136,6 +158,7 @@ impl<'src> Parser<'src> {
     fn parse_type_alias_stmt(&mut self) -> Result<Stmt> {
         let start = self.current().span.start;
         let start_line = self.current().span.line;
+        let span = self.current().span;
         let mut depth = 0usize;
         let mut seen_assign = false;
 
@@ -167,10 +190,11 @@ impl<'src> Parser<'src> {
         let end = self.previous().span.end;
         Ok(Stmt::TypeAlias {
             raw: self.source[start..end].trim().to_string(),
+            span,
         })
     }
 
-    fn parse_enum_stmt(&mut self) -> Result<Stmt> {
+    fn parse_enum_stmt(&mut self, span: Span) -> Result<Stmt> {
         let name = self.expect_identifier()?;
         let base_type = if self.match_symbol(Symbol::Colon) {
             Some(self.collect_type_annotation(&[StopToken::Keyword(Keyword::End)])?)
@@ -199,13 +223,14 @@ impl<'src> Parser<'src> {
         self.expect_keyword(Keyword::End)?;
 
         Ok(Stmt::Enum(EnumDecl {
+            span,
             name,
             base_type,
             members,
         }))
     }
 
-    fn parse_local_decl(&mut self, is_const: bool) -> Result<Stmt> {
+    fn parse_local_decl(&mut self, is_const: bool, span: Span) -> Result<Stmt> {
         let mut bindings = Vec::new();
         loop {
             let pattern = self.parse_pattern()?;
@@ -235,13 +260,14 @@ impl<'src> Parser<'src> {
         };
 
         Ok(Stmt::Local(LocalDecl {
+            span,
             is_const,
             bindings,
             values,
         }))
     }
 
-    fn parse_state_decl(&mut self) -> Result<Stmt> {
+    fn parse_state_decl(&mut self, span: Span) -> Result<Stmt> {
         let name = self.expect_identifier()?;
         let type_annotation = if self.match_symbol(Symbol::Colon) {
             Some(self.collect_type_annotation(&[
@@ -258,6 +284,7 @@ impl<'src> Parser<'src> {
             None
         };
         Ok(Stmt::State(StateDecl {
+            span,
             binding: Binding {
                 pattern: Pattern::Name(name),
                 type_annotation,
@@ -266,14 +293,14 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    fn parse_signal_stmt(&mut self) -> Result<Stmt> {
+    fn parse_signal_stmt(&mut self, span: Span) -> Result<Stmt> {
         let name = self.expect_identifier()?;
         let params = if self.match_symbol(Symbol::Colon) {
             self.parse_signal_signature()?
         } else {
             Vec::new()
         };
-        Ok(Stmt::Signal(SignalDecl { name, params }))
+        Ok(Stmt::Signal(SignalDecl { span, name, params }))
     }
 
     fn parse_signal_signature(&mut self) -> Result<Vec<SignalParam>> {
@@ -302,21 +329,22 @@ impl<'src> Parser<'src> {
         Ok(params)
     }
 
-    fn parse_fire_stmt(&mut self) -> Result<Stmt> {
+    fn parse_fire_stmt(&mut self, span: Span) -> Result<Stmt> {
         let signal = self.parse_pipe_callee()?;
         let args = if self.check_call_start_same_line() {
             self.parse_args()?
         } else {
             Vec::new()
         };
-        Ok(Stmt::Fire(FireStmt { signal, args }))
+        Ok(Stmt::Fire(FireStmt { span, signal, args }))
     }
 
-    fn parse_signal_handler_stmt(&mut self, once: bool) -> Result<Stmt> {
+    fn parse_signal_handler_stmt(&mut self, once: bool, span: Span) -> Result<Stmt> {
         let signal = self.parse_pipe_callee()?;
         let (params, body) = self.parse_pipe_block(&[Keyword::End])?;
         self.expect_keyword(Keyword::End)?;
         Ok(Stmt::SignalHandler(SignalHandlerStmt {
+            span,
             signal,
             params,
             body,
@@ -324,14 +352,24 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    fn parse_watch_stmt(&mut self) -> Result<Stmt> {
+    fn parse_watch_stmt(&mut self, span: Span) -> Result<Stmt> {
         let name = self.expect_identifier()?;
         let (params, body) = self.parse_pipe_block(&[Keyword::End])?;
         self.expect_keyword(Keyword::End)?;
-        Ok(Stmt::Watch(WatchStmt { name, params, body }))
+        Ok(Stmt::Watch(WatchStmt {
+            span,
+            name,
+            params,
+            body,
+        }))
     }
 
-    fn parse_function_stmt(&mut self, local_name: bool, is_task: bool) -> Result<Stmt> {
+    fn parse_function_stmt(
+        &mut self,
+        local_name: bool,
+        is_task: bool,
+        span: Span,
+    ) -> Result<Stmt> {
         let name = if local_name {
             let root = self.expect_identifier()?;
             FunctionName {
@@ -351,6 +389,7 @@ impl<'src> Parser<'src> {
         let (params, return_type, body) = self.parse_function_body()?;
 
         Ok(Stmt::Function(FunctionDecl {
+            span,
             local_name,
             is_task,
             name,
@@ -361,7 +400,7 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    fn parse_object_stmt(&mut self) -> Result<Stmt> {
+    fn parse_object_stmt(&mut self, span: Span) -> Result<Stmt> {
         let name = self.expect_identifier()?;
         let extends = if self.match_keyword(Keyword::Extends) {
             Some(self.expect_identifier()?)
@@ -391,6 +430,7 @@ impl<'src> Parser<'src> {
 
         self.expect_keyword(Keyword::End)?;
         Ok(Stmt::Object(ObjectDecl {
+            span,
             name,
             extends,
             fields,
@@ -422,7 +462,7 @@ impl<'src> Parser<'src> {
         })
     }
 
-    fn parse_spawn_stmt(&mut self) -> Result<Stmt> {
+    fn parse_spawn_stmt(&mut self, span: Span) -> Result<Stmt> {
         let call = self.parse_prefix_chain()?;
         if !self.is_call_statement_expr(&call) {
             return Err(self.error_here("spawn expects a function or method call"));
@@ -444,6 +484,7 @@ impl<'src> Parser<'src> {
         }
 
         Ok(Stmt::Spawn(SpawnStmt {
+            span,
             call,
             then_handler,
             catch_handler,
@@ -621,7 +662,7 @@ impl<'src> Parser<'src> {
         Ok(params)
     }
 
-    fn parse_if_stmt(&mut self) -> Result<Stmt> {
+    fn parse_if_stmt(&mut self, span: Span) -> Result<Stmt> {
         let condition = self.parse_expr()?;
         self.expect_keyword(Keyword::Then)?;
         let mut branches = vec![(
@@ -641,12 +682,13 @@ impl<'src> Parser<'src> {
         };
         self.expect_keyword(Keyword::End)?;
         Ok(Stmt::If(IfStmt {
+            span,
             branches,
             else_block,
         }))
     }
 
-    fn parse_switch_stmt(&mut self) -> Result<Stmt> {
+    fn parse_switch_stmt(&mut self, span: Span) -> Result<Stmt> {
         let value = self.parse_expr()?;
         let mut cases = Vec::new();
         let mut default = None;
@@ -656,7 +698,7 @@ impl<'src> Parser<'src> {
                 let case_value = self.parse_expr()?;
                 let mut block =
                     self.parse_block(&[Keyword::Case, Keyword::Default, Keyword::End])?;
-                let fallthrough = matches!(block.last(), Some(Stmt::Fallthrough));
+                let fallthrough = matches!(block.last(), Some(Stmt::Fallthrough(_)));
                 if fallthrough {
                     block.pop();
                 }
@@ -678,13 +720,14 @@ impl<'src> Parser<'src> {
 
         self.expect_keyword(Keyword::End)?;
         Ok(Stmt::Switch(SwitchStmt {
+            span,
             value,
             cases,
             default,
         }))
     }
 
-    fn parse_match_stmt(&mut self) -> Result<Stmt> {
+    fn parse_match_stmt(&mut self, span: Span) -> Result<Stmt> {
         let value = self.parse_match_subject_expr()?;
         let mut cases = Vec::new();
 
@@ -705,7 +748,7 @@ impl<'src> Parser<'src> {
         }
 
         self.expect_keyword(Keyword::End)?;
-        Ok(Stmt::Match(MatchStmt { value, cases }))
+        Ok(Stmt::Match(MatchStmt { span, value, cases }))
     }
 
     fn parse_match_subject_expr(&mut self) -> Result<Expr> {
@@ -773,22 +816,30 @@ impl<'src> Parser<'src> {
         Ok(expr)
     }
 
-    fn parse_while_stmt(&mut self) -> Result<Stmt> {
+    fn parse_while_stmt(&mut self, span: Span) -> Result<Stmt> {
         let condition = self.parse_expr()?;
         self.expect_keyword(Keyword::Do)?;
         let block = self.parse_block(&[Keyword::End])?;
         self.expect_keyword(Keyword::End)?;
-        Ok(Stmt::While { condition, block })
+        Ok(Stmt::While(WhileStmt {
+            span,
+            condition,
+            block,
+        }))
     }
 
-    fn parse_repeat_stmt(&mut self) -> Result<Stmt> {
+    fn parse_repeat_stmt(&mut self, span: Span) -> Result<Stmt> {
         let block = self.parse_block(&[Keyword::Until])?;
         self.expect_keyword(Keyword::Until)?;
         let condition = self.parse_expr()?;
-        Ok(Stmt::Repeat { block, condition })
+        Ok(Stmt::Repeat(RepeatStmt {
+            span,
+            block,
+            condition,
+        }))
     }
 
-    fn parse_for_stmt(&mut self) -> Result<Stmt> {
+    fn parse_for_stmt(&mut self, span: Span) -> Result<Stmt> {
         if self.check(TokenKind::Identifier) && self.check_symbol_at(1, Symbol::Assign) {
             let name = self.expect_identifier()?;
             self.expect_symbol(Symbol::Assign)?;
@@ -804,6 +855,7 @@ impl<'src> Parser<'src> {
             let block = self.parse_block(&[Keyword::End])?;
             self.expect_keyword(Keyword::End)?;
             return Ok(Stmt::ForNumeric(ForNumeric {
+                span,
                 name,
                 start,
                 end,
@@ -837,6 +889,7 @@ impl<'src> Parser<'src> {
         let block = self.parse_block(&[Keyword::End])?;
         self.expect_keyword(Keyword::End)?;
         Ok(Stmt::ForGeneric(ForGeneric {
+            span,
             bindings,
             iterables,
             block,
@@ -844,11 +897,13 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_assignment_or_call_stmt(&mut self) -> Result<Stmt> {
+        let span = self.current().span;
         let expr = self.parse_prefix_chain()?;
         if let Some(op) = self.current_compound_op() {
             self.bump();
             let value = self.parse_expr()?;
             return Ok(Stmt::CompoundAssignment {
+                span,
                 target: self.into_assign_target(expr)?,
                 op,
                 value,
@@ -857,6 +912,7 @@ impl<'src> Parser<'src> {
         if self.match_symbol(Symbol::DoubleQuestionEqual) {
             let value = self.parse_expr()?;
             return Ok(Stmt::NullishAssignment {
+                span,
                 target: self.into_assign_target(expr)?,
                 value,
             });
@@ -869,9 +925,13 @@ impl<'src> Parser<'src> {
             }
             self.expect_symbol(Symbol::Assign)?;
             let values = self.parse_expr_list()?;
-            return Ok(Stmt::Assignment(Assignment { targets, values }));
+            return Ok(Stmt::Assignment(Assignment {
+                span,
+                targets,
+                values,
+            }));
         }
-        Ok(Stmt::Call(expr))
+        Ok(Stmt::Call(expr, span))
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern> {
@@ -1125,6 +1185,11 @@ impl<'src> Parser<'src> {
             let text = self.bump().lexeme;
             return Ok(Expr::Number(text));
         }
+        if self.check_identifier_named("pattern") && self.peek(1).kind == TokenKind::String {
+            self.bump();
+            let text = self.bump().lexeme;
+            return Ok(Expr::Pattern(text));
+        }
         if self.check(TokenKind::Identifier) {
             let name = self.bump().lexeme;
             return self.parse_postfix(Expr::Name(name));
@@ -1208,7 +1273,7 @@ impl<'src> Parser<'src> {
                 break expr;
             }
             if self.is_call_statement_expr(&expr) {
-                block.push(Stmt::Call(expr));
+                block.push(Stmt::Call(expr, self.previous().span));
                 continue;
             }
             return Err(self.error_here(
@@ -1454,7 +1519,7 @@ impl<'src> Parser<'src> {
         let mut expr = base;
         loop {
             if self.match_symbol(Symbol::Dot) {
-                let name = self.expect_identifier()?;
+                let name = self.expect_name_segment()?;
                 expr = self.push_segment(expr, ChainSegment::Field { name, safe: false });
                 continue;
             }
@@ -1471,7 +1536,7 @@ impl<'src> Parser<'src> {
                 continue;
             }
             if self.match_symbol(Symbol::Colon) {
-                let name = self.expect_identifier()?;
+                let name = self.expect_name_segment()?;
                 let type_args = self.parse_explicit_type_args()?;
                 let args = self.parse_args()?;
                 expr = self.push_segment(
@@ -1523,7 +1588,7 @@ impl<'src> Parser<'src> {
             if self.check_symbol(Symbol::Question) && self.check_symbol_at(1, Symbol::Dot) {
                 self.bump();
                 self.bump();
-                let name = self.expect_identifier()?;
+                let name = self.expect_name_segment()?;
                 let type_args = self.parse_explicit_type_args()?;
                 if self.check_call_start_same_line() {
                     let args = self.parse_args()?;
@@ -1553,7 +1618,7 @@ impl<'src> Parser<'src> {
 
     fn parse_pipe_stage(&mut self) -> Result<PipeStage> {
         if self.match_symbol(Symbol::Colon) {
-            let name = self.expect_identifier()?;
+            let name = self.expect_name_segment()?;
             let args = self.parse_args()?;
             return Ok(PipeStage::Method { name, args });
         }
@@ -1585,7 +1650,7 @@ impl<'src> Parser<'src> {
 
         loop {
             if self.match_symbol(Symbol::Dot) {
-                let name = self.expect_identifier()?;
+                let name = self.expect_name_segment()?;
                 expr = self.push_segment(expr, ChainSegment::Field { name, safe: false });
                 continue;
             }
@@ -1889,6 +1954,13 @@ impl<'src> Parser<'src> {
             return Ok(self.bump().lexeme);
         }
         Err(self.error_here("expected identifier"))
+    }
+
+    fn expect_name_segment(&mut self) -> Result<String> {
+        match self.current().kind {
+            TokenKind::Identifier | TokenKind::Keyword(_) => Ok(self.bump().lexeme),
+            _ => Err(self.error_here("expected identifier")),
+        }
     }
 
     fn expect_keyword(&mut self, keyword: Keyword) -> Result<()> {

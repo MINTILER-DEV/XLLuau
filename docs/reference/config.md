@@ -101,11 +101,11 @@ Filenames tried when a module path resolves to a directory.
 
 ### `sourceMaps`
 
-Part of the language/tooling design.
+When `true`, writes `.luau.map` files next to emitted `.luau` output.
 
 ### `linePragmas`
 
-Part of the language/tooling design.
+When `true`, keeps emitted `--@line` comments in the generated Luau output.
 
 ### `strict`
 

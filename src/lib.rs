@@ -6,5 +6,6 @@ pub mod formatter;
 pub mod lexer;
 pub mod module;
 pub mod parser;
+pub mod source_map;
 
 pub use compiler::{BuildArtifact, Compiler};

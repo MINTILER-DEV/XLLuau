@@ -1,8 +1,8 @@
 # Pattern Literals and Readonly Sugar
 
-Status: split status
+Status: implemented
 
-- Pattern literals: designed, not yet implemented
+- Pattern literals: implemented in the current compiler
 - `readonly` and `freeze`: implemented in the current compiler
 
 This guide covers a few planned language features that are useful to know as part of the overall XLuau design.
@@ -15,15 +15,24 @@ Pattern literals are intended as friendlier syntax for Luau string patterns.
 
 String patterns in raw quoted form are powerful, but they are not always easy to read or maintain.
 
-### Intended Direction
+### Current Behavior
 
-The spec describes a syntax that makes pattern matching and extraction more expressive while still lowering to ordinary Luau string pattern behavior.
+The compiler supports `pattern\`...\`` and lowers it to an ordinary Luau string pattern at compile time.
 
 Use cases include:
 
 - Repeated captures
 - Pattern constants
 - More readable extraction rules
+
+Example:
+
+```lua
+const DATE_PATTERN = pattern`{%d+}-{%d+}-{%d+}`
+local year, month, day = date:match(pattern`{year:%d+}-{month:%d+}-{day:%d+}`)
+```
+
+This lowers to ordinary string literals such as `"(%d+)-(%d+)-(%d+)"`.
 
 ### Why This Fits XLuau
 

@@ -14,6 +14,7 @@ use crate::{
     lexer::{Keyword, Lexer, Symbol, Token},
     module::{ModuleResolver, detect_circular_dependencies},
     parser::Parser,
+    source_map::{SourceMap, finalize_output},
 };
 
 pub type Result<T> = std::result::Result<T, CompilerError>;
@@ -23,6 +24,13 @@ pub struct BuildArtifact {
     pub input: PathBuf,
     pub output: PathBuf,
     pub luau: String,
+    pub source_map: Option<SourceMap>,
+}
+
+#[derive(Debug)]
+struct CompiledOutput {
+    luau: String,
+    source_map: Option<SourceMap>,
 }
 
 #[derive(Debug)]
@@ -67,7 +75,7 @@ impl Compiler {
     }
 
     pub fn compile_source(&self, source: &str) -> Result<String> {
-        self.compile_source_with_path(source, Path::new("<memory>"))
+        Ok(self.compile_source_with_path(source, Path::new("<memory>"))?.luau)
     }
 
     pub fn build_file(&self, path: &Path) -> Result<BuildArtifact> {
@@ -81,12 +89,13 @@ impl Compiler {
             path: input.clone(),
             source,
         })?;
-        let luau = self.compile_source_with_path(&source, &input)?;
+        let compiled = self.compile_source_with_path(&source, &input)?;
         let output = self.output_path_for(&input)?;
         Ok(BuildArtifact {
             input,
             output,
-            luau,
+            luau: compiled.luau,
+            source_map: compiled.source_map,
         })
     }
 
@@ -100,12 +109,13 @@ impl Compiler {
                 path: path.clone(),
                 source,
             })?;
-            let luau = self.compile_source_with_path(&source, &path)?;
+            let compiled = self.compile_source_with_path(&source, &path)?;
             let output = self.output_path_for(&path)?;
             artifacts.push(BuildArtifact {
                 input: path,
                 output,
-                luau,
+                luau: compiled.luau,
+                source_map: compiled.source_map,
             });
         }
         Ok(artifacts)
@@ -147,7 +157,17 @@ impl Compiler {
         fs::write(&artifact.output, &artifact.luau).map_err(|source| CompilerError::Io {
             path: artifact.output.clone(),
             source,
-        })
+        })?;
+        if let Some(source_map) = &artifact.source_map {
+            let map_path = artifact.output.with_extension("luau.map");
+            let contents = serde_json::to_string_pretty(source_map)
+                .map_err(|source| CompilerError::Other(source.to_string()))?;
+            fs::write(&map_path, contents).map_err(|source| CompilerError::Io {
+                path: map_path,
+                source,
+            })?;
+        }
+        Ok(())
     }
 
     fn output_path_for(&self, input: &Path) -> Result<PathBuf> {
@@ -226,7 +246,7 @@ impl Compiler {
         lines
     }
 
-    fn compile_source_with_path(&self, source: &str, path: &Path) -> Result<String> {
+    fn compile_source_with_path(&self, source: &str, path: &Path) -> Result<CompiledOutput> {
         let resolver = self.module_resolver();
         let rewritten_source = resolver.rewrite_requires(source, path)?;
         let should_force_xluau = Lexer::new(source)
@@ -234,8 +254,18 @@ impl Compiler {
             .ok()
             .map(|tokens| self.contains_xluau_tokens(&tokens))
             .unwrap_or(false);
+        let emitted_file = self.output_path_for(path).unwrap_or_else(|_| PathBuf::from("<memory>.luau"));
+        let source_name = path.to_string_lossy().replace('\\', "/");
         if !should_force_xluau && self.validate_luau(&rewritten_source).is_ok() {
-            return format_luau(&rewritten_source);
+            let formatted = format_luau(&rewritten_source)?;
+            let source_map = self
+                .config
+                .source_maps
+                .then(|| finalize_output(&formatted, self.config.line_pragmas, path, &emitted_file).1);
+            return Ok(CompiledOutput {
+                luau: formatted,
+                source_map,
+            });
         }
 
         let tokens = Lexer::new(source).tokenize()?;
@@ -244,11 +274,23 @@ impl Compiler {
         let mut emitter = Emitter::with_options(
             self.config.luau_target.clone(),
             self.config.task_adapter == "roblox" || self.config.target == "roblox",
+            Some(source_name),
+            self.config.source_maps || self.config.line_pragmas,
         );
         let raw = emitter.emit_program(&program)?;
         let rewritten_output = resolver.rewrite_requires(&raw, path)?;
         self.validate_luau(&rewritten_output)?;
-        format_luau(&rewritten_output)
+        let formatted = format_luau(&rewritten_output)?;
+        let (luau, source_map) = finalize_output(
+            &formatted,
+            self.config.line_pragmas,
+            path,
+            &emitted_file,
+        );
+        Ok(CompiledOutput {
+            luau,
+            source_map: self.config.source_maps.then_some(source_map),
+        })
     }
 
     fn module_resolver(&self) -> ModuleResolver {
@@ -1014,5 +1056,48 @@ currentMap ??= "Lobby"
         assert!(output.contains("_w(_old"));
         assert!(output.contains("local currentMap: string? = nil"));
         assert!(output.contains("currentMap = \"Lobby\""));
+    }
+
+    #[test]
+    fn lowers_phase8_pattern_literals() {
+        let source = r#"
+const DATE_PATTERN = pattern`{%d+}-{%d+}-{%d+}`
+local year, month, day = date:match(pattern`{year:%d+}-{month:%d+}-{day:%d+}`)
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains(r#"local DATE_PATTERN = "(%d+)-(%d+)-(%d+)""#));
+        assert!(output.contains(r#"date:match("(%d+)-(%d+)-(%d+)")"#));
+    }
+
+    #[test]
+    fn emits_phase8_source_maps_and_line_pragmas() {
+        let root = temp_project("phase8_sourcemaps");
+        write_file(
+            &root,
+            "xluau.config.json",
+            r#"{
+  "include": ["src/**/*.xl"],
+  "sourceMaps": true,
+  "linePragmas": true
+}"#,
+        );
+        write_file(
+            &root,
+            "src/main.xl",
+            r#"
+const DATE_PATTERN = pattern`{%d+}-{%d+}-{%d+}`
+local year, month, day = date:match(pattern`{year:%d+}-{month:%d+}-{day:%d+}`)
+"#,
+        );
+
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
+        assert!(artifact.luau.contains("--@line 2"));
+        assert!(artifact.source_map.is_some());
+        let map = artifact.source_map.unwrap();
+        assert_eq!(map.version, 1);
+        assert!(map.source_file.ends_with("src/main.xl"));
+        assert!(map.emitted_file.ends_with("out/src/main.luau"));
+        assert!(!map.mappings.is_empty());
     }
 }

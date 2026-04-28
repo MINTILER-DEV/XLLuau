@@ -56,13 +56,15 @@ These features are implemented and tested in the current Rust compiler:
 - Exhaustiveness checks for:
   - `switch` over literal unions and enums
   - `match` over discriminated unions
+- Pattern literals
+- Source maps and line pragmas
+- `xluau remap`
+- `build --watch` and `check --watch`
 
 ## Designed but Not Yet Implemented
 
 These are part of the language design and are documented here so people can learn the intended shape of XLuau, but they are not fully implemented in the current compiler yet:
 
-- Pattern literals
-- Source maps and line pragmas
 - LSP and editor tooling described in the spec
 
 ## How to Read the Guides
