@@ -46,6 +46,13 @@ These features are implemented and tested in the current Rust compiler:
 - `yield`
 - `spawn`
 - Roblox task adapter for `spawn`
+- `signal`
+- `fire`
+- `on`
+- `once`
+- `state`
+- `watch`
+- State assignment interception for direct assignment, compound assignment, and `??=`
 - Exhaustiveness checks for:
   - `switch` over literal unions and enums
   - `match` over discriminated unions
@@ -54,8 +61,6 @@ These features are implemented and tested in the current Rust compiler:
 
 These are part of the language design and are documented here so people can learn the intended shape of XLuau, but they are not fully implemented in the current compiler yet:
 
-- Signals
-- Reactive state
 - Pattern literals
 - Source maps and line pragmas
 - LSP and editor tooling described in the spec

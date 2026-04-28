@@ -1,8 +1,8 @@
 # Signals and Reactive State
 
-Status: designed, not fully implemented in the current compiler
+Status: implemented for phase 7 in the current compiler
 
-This guide explains the intended XLuau model for signals and reactive state.
+This guide explains the XLuau model for signals and reactive state as implemented in the current compiler.
 
 ## Why These Features Exist
 
@@ -17,7 +17,7 @@ The XLuau design makes those patterns first-class without introducing a runtime 
 
 ## Signals
 
-### Intended Syntax
+### Syntax
 
 ```lua
 signal OnPlayerJoined: (player: Player)
@@ -59,20 +59,26 @@ The design gives you a direct syntax for the things people usually build by hand
 - fire all handlers
 - auto-disconnect after the first fire
 
-### Intended Lowering Shape
+### Lowering Shape
 
-The spec lowers signals into a structure with pieces like:
+Signals lower into ordinary Luau tables with:
 
 - `_handlers`
 - `connect`
 - `once`
 - `fire`
 
-That matters because the feature is still understandable in normal Luau terms.
+For example:
+
+```lua
+signal OnPlayerJoined: (player: Player)
+```
+
+becomes a typed signal table with a generated `_Signal_OnPlayerJoined` alias plus a local value that stores handlers and exposes `connect`, `once`, and `fire`.
 
 ## Reactive State
 
-### Intended Syntax
+### Syntax
 
 ```lua
 state playerCount: number = 0
@@ -93,7 +99,7 @@ Assignments remain normal assignments:
 playerCount = playerCount + 1
 ```
 
-The compiler would lower those assignments into watcher-aware updates.
+The compiler lowers those assignments into watcher-aware updates.
 
 ### Mental Model
 
@@ -120,4 +126,13 @@ The important part is that these are meant to compile into ordinary callback-tab
 
 ## Practical Advice Today
 
-These are documented here so learners can understand the intended direction of XLuau, but they are not fully implemented in the current compiler yet.
+Current behavior:
+
+- `signal Name: (...)` emits a generated signal type plus a local handler table implementation
+- `fire Name(...)` lowers to `Name:fire(...)`
+- `on Name |...| ... end` lowers to `Name:connect(function(...) ... end)`
+- `once Name |...| ... end` lowers to `Name:once(function(...) ... end)`
+- `local conn = on ... end` and `local conn = once ... end` are supported
+- `state name: T = value` emits a backing local plus a watcher list
+- `watch name |old, new| ... end` registers a watcher with `table.insert`
+- direct assignment, compound assignment, and `??=` on state locals notify watchers when the value changes
