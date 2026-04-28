@@ -274,7 +274,13 @@ impl Compiler {
                 | Keyword::Task
                 | Keyword::Yield
                 | Keyword::Spawn
-                | Keyword::Catch,
+                | Keyword::Fire
+                | Keyword::On
+                | Keyword::Once
+                | Keyword::Signal
+                | Keyword::State
+                | Keyword::Catch
+                | Keyword::Watch,
             ) => true,
             crate::lexer::TokenKind::Symbol(
                 Symbol::DoubleQuestion
@@ -942,5 +948,71 @@ spawn animate(workspace.Model)
         assert!(artifact.luau.contains("task.spawn(function()"));
         assert!(artifact.luau.contains("local _co"));
         assert!(artifact.luau.contains("coroutine.resume("));
+    }
+
+    #[test]
+    fn lowers_phase7_signals() {
+        let source = r#"
+signal OnPlayerJoined: (player: Player)
+signal OnDied
+
+local conn = on OnPlayerJoined |player|
+    setupHUD(player)
+end
+
+on OnPlayerJoined |player|
+    print(player.Name)
+end
+
+once OnDied ||
+    cleanup()
+end
+
+fire OnPlayerJoined(player)
+fire OnDied
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("type _Signal_OnPlayerJoined = {"));
+        assert!(output.contains("_handlers: { (player: Player) -> () },"));
+        assert!(output.contains("local OnPlayerJoined: _Signal_OnPlayerJoined = {"));
+        assert!(output.contains("local _conn0 = OnPlayerJoined:connect(function(player)"));
+        assert!(output.contains("local conn = _conn0"));
+        assert!(output.contains("OnPlayerJoined:connect(function(player)"));
+        assert!(output.contains("OnDied:once(function()"));
+        assert!(output.contains("OnPlayerJoined:fire(player)"));
+        assert!(output.contains("OnDied:fire()"));
+    }
+
+    #[test]
+    fn lowers_phase7_reactive_state() {
+        let source = r#"
+state playerCount: number = 0
+
+watch playerCount |old, new|
+    updatePlayerCountUI(new)
+end
+
+playerCount = playerCount + 1
+playerCount += 2
+
+state currentMap: string? = nil
+
+watch currentMap |old, new|
+    loadMap(new)
+end
+
+currentMap ??= "Lobby"
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("local playerCount: number = 0"));
+        assert!(output.contains("local _watchers_playerCount_"));
+        assert!(output.contains("table.insert(_watchers_playerCount_"));
+        assert!(output.contains("function(old, new)"));
+        assert!(output.contains("do\n    local _old"));
+        assert!(output.contains("playerCount = (playerCount + 1)"));
+        assert!(output.contains("playerCount = playerCount + 2"));
+        assert!(output.contains("_w(_old"));
+        assert!(output.contains("local currentMap: string? = nil"));
+        assert!(output.contains("currentMap = \"Lobby\""));
     }
 }

@@ -1,0 +1,34 @@
+type Player = { Name: string }
+
+signal OnPlayerJoined: (player: Player)
+signal OnDied
+
+state playerCount: number = 0
+state currentMap: string? = nil
+
+local conn = on OnPlayerJoined |player|
+    print("joined", player.Name)
+end
+
+once OnDied ||
+    print("died")
+end
+
+watch playerCount |old, new|
+    print("count", old, new)
+end
+
+watch currentMap |old, new|
+    print("map", old, new)
+end
+
+playerCount = playerCount + 1
+playerCount += 2
+currentMap ??= "Lobby"
+
+fire OnPlayerJoined({ Name = "Ada" })
+fire OnDied
+
+conn:disconnect()
+
+return playerCount, currentMap

@@ -46,6 +46,9 @@ impl<'src> Parser<'src> {
         if self.match_keyword(Keyword::Const) {
             return self.parse_local_decl(true);
         }
+        if self.match_keyword(Keyword::State) {
+            return self.parse_state_decl();
+        }
         if self.match_keyword(Keyword::Function) {
             return self.parse_function_stmt(false, false);
         }
@@ -58,6 +61,9 @@ impl<'src> Parser<'src> {
         }
         if self.match_keyword(Keyword::Enum) {
             return self.parse_enum_stmt();
+        }
+        if self.match_keyword(Keyword::Signal) {
+            return self.parse_signal_stmt();
         }
         if self.match_keyword(Keyword::If) {
             return self.parse_if_stmt();
@@ -98,6 +104,18 @@ impl<'src> Parser<'src> {
         }
         if self.match_keyword(Keyword::Fallthrough) {
             return Ok(Stmt::Fallthrough);
+        }
+        if self.match_keyword(Keyword::Fire) {
+            return self.parse_fire_stmt();
+        }
+        if self.match_keyword(Keyword::On) {
+            return self.parse_signal_handler_stmt(false);
+        }
+        if self.match_keyword(Keyword::Once) {
+            return self.parse_signal_handler_stmt(true);
+        }
+        if self.match_keyword(Keyword::Watch) {
+            return self.parse_watch_stmt();
         }
         if self.match_keyword(Keyword::Yield) {
             let expr = self.parse_expr()?;
@@ -223,6 +241,96 @@ impl<'src> Parser<'src> {
         }))
     }
 
+    fn parse_state_decl(&mut self) -> Result<Stmt> {
+        let name = self.expect_identifier()?;
+        let type_annotation = if self.match_symbol(Symbol::Colon) {
+            Some(self.collect_type_annotation(&[
+                StopToken::Symbol(Symbol::Assign),
+                StopToken::Keyword(Keyword::In),
+                StopToken::Symbol(Symbol::RParen),
+            ])?)
+        } else {
+            None
+        };
+        let value = if self.match_symbol(Symbol::Assign) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(Stmt::State(StateDecl {
+            binding: Binding {
+                pattern: Pattern::Name(name),
+                type_annotation,
+            },
+            value,
+        }))
+    }
+
+    fn parse_signal_stmt(&mut self) -> Result<Stmt> {
+        let name = self.expect_identifier()?;
+        let params = if self.match_symbol(Symbol::Colon) {
+            self.parse_signal_signature()?
+        } else {
+            Vec::new()
+        };
+        Ok(Stmt::Signal(SignalDecl { name, params }))
+    }
+
+    fn parse_signal_signature(&mut self) -> Result<Vec<SignalParam>> {
+        self.expect_symbol(Symbol::LParen)?;
+        let mut params = Vec::new();
+        if self.match_symbol(Symbol::RParen) {
+            return Ok(params);
+        }
+        loop {
+            let name = self.expect_identifier()?;
+            let annotation = if self.match_symbol(Symbol::Colon) {
+                Some(self.collect_type_annotation(&[
+                    StopToken::Symbol(Symbol::Comma),
+                    StopToken::Symbol(Symbol::RParen),
+                ])?)
+            } else {
+                None
+            };
+            params.push(SignalParam { name, annotation });
+            if self.match_symbol(Symbol::Comma) {
+                continue;
+            }
+            self.expect_symbol(Symbol::RParen)?;
+            break;
+        }
+        Ok(params)
+    }
+
+    fn parse_fire_stmt(&mut self) -> Result<Stmt> {
+        let signal = self.parse_pipe_callee()?;
+        let args = if self.check_call_start_same_line() {
+            self.parse_args()?
+        } else {
+            Vec::new()
+        };
+        Ok(Stmt::Fire(FireStmt { signal, args }))
+    }
+
+    fn parse_signal_handler_stmt(&mut self, once: bool) -> Result<Stmt> {
+        let signal = self.parse_pipe_callee()?;
+        let (params, body) = self.parse_pipe_block(&[Keyword::End])?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Stmt::SignalHandler(SignalHandlerStmt {
+            signal,
+            params,
+            body,
+            once,
+        }))
+    }
+
+    fn parse_watch_stmt(&mut self) -> Result<Stmt> {
+        let name = self.expect_identifier()?;
+        let (params, body) = self.parse_pipe_block(&[Keyword::End])?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Stmt::Watch(WatchStmt { name, params, body }))
+    }
+
     fn parse_function_stmt(&mut self, local_name: bool, is_task: bool) -> Result<Stmt> {
         let name = if local_name {
             let root = self.expect_identifier()?;
@@ -343,6 +451,11 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_spawn_handler(&mut self, terminators: &[Keyword]) -> Result<SpawnHandler> {
+        let (params, block) = self.parse_pipe_block(terminators)?;
+        Ok(SpawnHandler { params, block })
+    }
+
+    fn parse_pipe_block(&mut self, terminators: &[Keyword]) -> Result<(Vec<String>, Block)> {
         self.expect_symbol(Symbol::Pipe)?;
         let mut params = Vec::new();
         if !self.check_symbol(Symbol::Pipe) {
@@ -355,7 +468,7 @@ impl<'src> Parser<'src> {
         }
         self.expect_symbol(Symbol::Pipe)?;
         let block = self.parse_block(terminators)?;
-        Ok(SpawnHandler { params, block })
+        Ok((params, block))
     }
 
     fn collect_object_field_annotation(&mut self) -> Result<String> {
@@ -960,6 +1073,12 @@ impl<'src> Parser<'src> {
         if self.match_keyword(Keyword::Function) {
             return self.parse_function_expr();
         }
+        if self.match_keyword(Keyword::On) {
+            return self.parse_signal_handler_expr(false);
+        }
+        if self.match_keyword(Keyword::Once) {
+            return self.parse_signal_handler_expr(true);
+        }
         if self.match_keyword(Keyword::Yield) {
             return Ok(Expr::Yield(Box::new(self.parse_expr_bp(10)?)));
         }
@@ -1012,6 +1131,18 @@ impl<'src> Parser<'src> {
         }
 
         Err(self.error_here("expected expression"))
+    }
+
+    fn parse_signal_handler_expr(&mut self, once: bool) -> Result<Expr> {
+        let signal = self.parse_pipe_callee()?;
+        let (params, body) = self.parse_pipe_block(&[Keyword::End])?;
+        self.expect_keyword(Keyword::End)?;
+        Ok(Expr::SignalHandler(Box::new(SignalHandlerExpr {
+            signal,
+            params,
+            body,
+            once,
+        })))
     }
 
     fn parse_if_expr(&mut self) -> Result<Expr> {
@@ -1704,10 +1835,12 @@ impl<'src> Parser<'src> {
             self.current().kind,
             TokenKind::Keyword(Keyword::Local)
                 | TokenKind::Keyword(Keyword::Const)
+                | TokenKind::Keyword(Keyword::State)
                 | TokenKind::Keyword(Keyword::Function)
                 | TokenKind::Keyword(Keyword::Task)
                 | TokenKind::Keyword(Keyword::Object)
                 | TokenKind::Keyword(Keyword::Enum)
+                | TokenKind::Keyword(Keyword::Signal)
                 | TokenKind::Keyword(Keyword::If)
                 | TokenKind::Keyword(Keyword::Switch)
                 | TokenKind::Keyword(Keyword::Match)
@@ -1718,7 +1851,11 @@ impl<'src> Parser<'src> {
                 | TokenKind::Keyword(Keyword::Break)
                 | TokenKind::Keyword(Keyword::Continue)
                 | TokenKind::Keyword(Keyword::Fallthrough)
+                | TokenKind::Keyword(Keyword::Fire)
+                | TokenKind::Keyword(Keyword::On)
+                | TokenKind::Keyword(Keyword::Once)
                 | TokenKind::Keyword(Keyword::Spawn)
+                | TokenKind::Keyword(Keyword::Watch)
                 | TokenKind::Keyword(Keyword::Do)
                 | TokenKind::Keyword(Keyword::Type)
                 | TokenKind::Keyword(Keyword::Export)

@@ -8,9 +8,14 @@ pub type Block = Vec<Stmt>;
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Local(LocalDecl),
+    State(StateDecl),
     Function(FunctionDecl),
     Object(ObjectDecl),
     Enum(EnumDecl),
+    Signal(SignalDecl),
+    Fire(FireStmt),
+    SignalHandler(SignalHandlerStmt),
+    Watch(WatchStmt),
     Assignment(Assignment),
     CompoundAssignment {
         target: AssignTarget,
@@ -44,6 +49,45 @@ pub enum Stmt {
     TypeAlias {
         raw: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct StateDecl {
+    pub binding: Binding,
+    pub value: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalDecl {
+    pub name: String,
+    pub params: Vec<SignalParam>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalParam {
+    pub name: String,
+    pub annotation: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FireStmt {
+    pub signal: Expr,
+    pub args: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalHandlerStmt {
+    pub signal: Expr,
+    pub params: Vec<String>,
+    pub body: Block,
+    pub once: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct WatchStmt {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Block,
 }
 
 #[derive(Debug, Clone)]
@@ -291,6 +335,15 @@ pub enum Expr {
         stages: Vec<PipeStage>,
     },
     Comprehension(Box<TableComprehension>),
+    SignalHandler(Box<SignalHandlerExpr>),
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalHandlerExpr {
+    pub signal: Expr,
+    pub params: Vec<String>,
+    pub body: Block,
+    pub once: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -15,6 +15,7 @@ pub struct Emitter {
     type_defs: HashMap<String, TypeShape>,
     type_alias_bodies: HashMap<String, String>,
     value_type_scopes: Vec<HashMap<String, String>>,
+    state_scopes: Vec<HashMap<String, StateBinding>>,
     object_contexts: Vec<ObjectContext>,
     task_depth: usize,
     errors: Vec<String>,
@@ -67,6 +68,12 @@ struct FunctionSignature {
 }
 
 #[derive(Debug, Clone)]
+struct StateBinding {
+    watchers_name: String,
+    value_type: String,
+}
+
+#[derive(Debug, Clone)]
 struct TableTypeFieldSpec {
     key: String,
     value: String,
@@ -102,6 +109,7 @@ impl Emitter {
             type_defs: HashMap::new(),
             type_alias_bodies: HashMap::new(),
             value_type_scopes: vec![HashMap::new()],
+            state_scopes: vec![HashMap::new()],
             object_contexts: Vec::new(),
             task_depth: 0,
             errors: Vec::new(),
@@ -124,6 +132,7 @@ impl Emitter {
         self.type_scopes.push(HashMap::new());
         self.function_scopes.push(HashMap::new());
         self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
         self.predeclare_block(block);
         let mut lines = Vec::new();
         for stmt in block {
@@ -136,18 +145,24 @@ impl Emitter {
         self.type_scopes.pop();
         self.function_scopes.pop();
         self.value_type_scopes.pop();
+        self.state_scopes.pop();
         Ok(lines.join("\n"))
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt, indent: usize) -> Result<String> {
         match stmt {
             Stmt::Local(local) => self.emit_local(local, indent),
+            Stmt::State(state) => self.emit_state_decl(state, indent),
             Stmt::Function(function) => self.emit_function_stmt(function, indent),
             Stmt::Object(object) => self.emit_object_decl(object, indent),
             Stmt::Enum(decl) => {
                 self.register_enum_type(decl);
                 self.emit_enum_decl(decl, indent)
             }
+            Stmt::Signal(signal) => self.emit_signal_decl(signal, indent),
+            Stmt::Fire(fire) => self.emit_fire_stmt(fire, indent),
+            Stmt::SignalHandler(handler) => self.emit_signal_handler_stmt(handler, indent),
+            Stmt::Watch(watch) => self.emit_watch_stmt(watch, indent),
             Stmt::Assignment(assignment) => self.emit_assignment(assignment, indent),
             Stmt::CompoundAssignment { target, op, value } => {
                 self.emit_compound_assignment(target, *op, value, indent)
@@ -247,6 +262,280 @@ impl Emitter {
         self.declare_local_value_types(local);
 
         Ok(parts.join("\n"))
+    }
+
+    fn emit_state_decl(&mut self, state: &StateDecl, indent: usize) -> Result<String> {
+        let Pattern::Name(name) = &state.binding.pattern else {
+            self.errors
+                .push("state declarations require a simple name binding".to_string());
+            return Ok(String::new());
+        };
+
+        let value_type = state
+            .binding
+            .type_annotation
+            .as_ref()
+            .map(|text| self.rewrite_type_text(text))
+            .or_else(|| state.value.as_ref().and_then(|value| self.infer_value_type(value)))
+            .unwrap_or_else(|| "any".to_string());
+        let watchers_name = self.next_temp(&format!("watchers_{name}_"));
+
+        let mut parts = Vec::new();
+        let annotation = state
+            .binding
+            .type_annotation
+            .as_ref()
+            .map(|text| format!(": {}", self.rewrite_type_text(text)))
+            .or_else(|| {
+                if value_type == "any" {
+                    None
+                } else {
+                    Some(format!(": {value_type}"))
+                }
+            })
+            .unwrap_or_default();
+
+        if let Some(value) = &state.value {
+            let lowered = self.emit_expr(value, None)?;
+            self.push_setup(&mut parts, indent, lowered.setup);
+            parts.push(self.indent(
+                indent,
+                &format!("local {name}{annotation} = {}", lowered.expr),
+            ));
+        } else {
+            parts.push(self.indent(indent, &format!("local {name}{annotation}")));
+        }
+        parts.push(self.indent(
+            indent,
+            &format!(
+                "local {watchers_name}: {{ (old: {value_type}, new: {value_type}) -> () }} = {{}}"
+            ),
+        ));
+
+        self.declare_name(name, false);
+        self.declare_pattern_types(&state.binding.pattern, &state.binding.type_annotation);
+        self.register_state_binding(name, &watchers_name, &value_type);
+        if let Some(scope) = self.value_type_scopes.last_mut() {
+            scope.insert(name.clone(), value_type);
+        }
+
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_signal_decl(&mut self, signal: &SignalDecl, indent: usize) -> Result<String> {
+        let signal_type = format!("_Signal_{}", signal.name);
+        let handler_params = self.render_signal_handler_signature(&signal.params);
+        let fire_params = self.render_signal_fire_signature(&signal.params);
+        let mut parts = Vec::new();
+
+        parts.push(self.indent(indent, &format!("type {signal_type} = {{")));
+        parts.push(self.indent(
+            indent + 1,
+            &format!("_handlers: {{ ({handler_params}) -> () }},"),
+        ));
+        parts.push(self.indent(
+            indent + 1,
+            &format!(
+                "connect: (self: {signal_type}, fn: ({handler_params}) -> ()) -> {{ disconnect: () -> () }},"
+            ),
+        ));
+        parts.push(self.indent(
+            indent + 1,
+            &format!(
+                "once: (self: {signal_type}, fn: ({handler_params}) -> ()) -> {{ disconnect: () -> () }},"
+            ),
+        ));
+        parts.push(self.indent(
+            indent + 1,
+            &format!("fire: (self: {signal_type}{fire_params}) -> (),"),
+        ));
+        parts.push(self.indent(indent, "}"));
+
+        parts.push(self.indent(
+            indent,
+            &format!("local {}: {} = {{", signal.name, signal_type),
+        ));
+        parts.push(self.indent(indent + 1, "_handlers = {},"));
+        parts.push(self.indent(indent + 1, "connect = function(self, fn)"));
+        parts.push(self.indent(indent + 2, "table.insert(self._handlers, fn)"));
+        parts.push(self.indent(indent + 2, "return { disconnect = function()"));
+        parts.push(self.indent(
+            indent + 3,
+            "local _index = table.find(self._handlers, fn)",
+        ));
+        parts.push(self.indent(indent + 3, "if _index ~= nil then"));
+        parts.push(self.indent(
+            indent + 4,
+            "table.remove(self._handlers, _index)",
+        ));
+        parts.push(self.indent(indent + 3, "end"));
+        parts.push(self.indent(indent + 2, "end }"));
+        parts.push(self.indent(indent + 1, "end,"));
+        parts.push(self.indent(indent + 1, "once = function(self, fn)"));
+        parts.push(self.indent(indent + 2, "local conn"));
+        parts.push(self.indent(indent + 2, "conn = self:connect(function(...)"));
+        parts.push(self.indent(indent + 3, "conn:disconnect()"));
+        parts.push(self.indent(indent + 3, "fn(...)"));
+        parts.push(self.indent(indent + 2, "end)"));
+        parts.push(self.indent(indent + 2, "return conn"));
+        parts.push(self.indent(indent + 1, "end,"));
+        parts.push(self.indent(indent + 1, "fire = function(self, ...)"));
+        parts.push(self.indent(indent + 2, "for _, handler in self._handlers do"));
+        parts.push(self.indent(indent + 3, "handler(...)"));
+        parts.push(self.indent(indent + 2, "end"));
+        parts.push(self.indent(indent + 1, "end,"));
+        parts.push(self.indent(indent, "}"));
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_fire_stmt(&mut self, fire: &FireStmt, indent: usize) -> Result<String> {
+        let signal = self.emit_expr(&fire.signal, None)?;
+        let mut parts = Vec::new();
+        self.push_setup(&mut parts, indent, signal.setup);
+        let (arg_setup, args) = self.emit_args(&fire.args, None)?;
+        self.push_setup(&mut parts, indent, arg_setup);
+        parts.push(self.indent(
+            indent,
+            &format!("{}:fire({})", signal.expr, args.join(", ")),
+        ));
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_signal_handler_stmt(
+        &mut self,
+        handler: &SignalHandlerStmt,
+        indent: usize,
+    ) -> Result<String> {
+        self.emit_signal_handler_call(
+            &handler.signal,
+            &handler.params,
+            &handler.body,
+            handler.once,
+            indent,
+            None,
+        )
+    }
+
+    fn emit_watch_stmt(&mut self, watch: &WatchStmt, indent: usize) -> Result<String> {
+        let Some(state) = self.lookup_state_binding(&watch.name).cloned() else {
+            self.errors
+                .push(format!("cannot watch undeclared state `{}`", watch.name));
+            return Ok(String::new());
+        };
+
+        let params = if watch.params.is_empty() {
+            vec!["old".to_string(), "new".to_string()]
+        } else {
+            watch.params.clone()
+        };
+        let mut parts = vec![self.indent(
+            indent,
+            &format!("table.insert({}, function({})", state.watchers_name, params.join(", ")),
+        )];
+
+        self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
+        for param in &params {
+            self.declare_name(param, false);
+            if let Some(scope) = self.value_type_scopes.last_mut() {
+                scope.insert(param.clone(), state.value_type.clone());
+            }
+        }
+        let body = self.emit_block(&watch.body, indent + 1)?;
+        self.const_scopes.pop();
+        self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
+        self.state_scopes.pop();
+
+        if !body.is_empty() {
+            parts.push(body);
+        }
+        parts.push(self.indent(indent, "end)"));
+        Ok(parts.join("\n"))
+    }
+
+    fn emit_signal_handler_call(
+        &mut self,
+        signal: &Expr,
+        params: &[String],
+        body: &Block,
+        once: bool,
+        indent: usize,
+        assign_to: Option<&str>,
+    ) -> Result<String> {
+        let lowered_signal = self.emit_expr(signal, None)?;
+        let mut parts = Vec::new();
+        self.push_setup(&mut parts, indent, lowered_signal.setup);
+        let method = if once { "once" } else { "connect" };
+        let prefix = assign_to
+            .map(|name| format!("local {name} = "))
+            .unwrap_or_default();
+        parts.push(self.indent(
+            indent,
+            &format!(
+                "{prefix}{}:{method}(function({})",
+                lowered_signal.expr,
+                params.join(", ")
+            ),
+        ));
+
+        self.const_scopes.push(HashSet::new());
+        self.type_scopes.push(HashMap::new());
+        self.function_scopes.push(HashMap::new());
+        self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
+        for param in params {
+            self.declare_name(param, false);
+        }
+        let emitted_body = self.emit_block(body, indent + 1)?;
+        self.const_scopes.pop();
+        self.type_scopes.pop();
+        self.function_scopes.pop();
+        self.value_type_scopes.pop();
+        self.state_scopes.pop();
+
+        if !emitted_body.is_empty() {
+            parts.push(emitted_body);
+        }
+        parts.push(self.indent(indent, "end)"));
+        Ok(parts.join("\n"))
+    }
+
+    fn render_signal_handler_signature(&self, params: &[SignalParam]) -> String {
+        params
+            .iter()
+            .map(|param| match &param.annotation {
+                Some(annotation) => format!("{}: {}", param.name, self.rewrite_type_text(annotation)),
+                None => param.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn render_signal_fire_signature(&self, params: &[SignalParam]) -> String {
+        if params.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", {}",
+                params
+                    .iter()
+                    .map(|param| match &param.annotation {
+                        Some(annotation) => format!(
+                            "{}: {}",
+                            param.name,
+                            self.rewrite_type_text(annotation)
+                        ),
+                        None => param.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
     }
 
     fn lower_local_values(
@@ -387,6 +676,7 @@ impl Emitter {
         self.type_scopes.push(HashMap::new());
         self.function_scopes.push(HashMap::new());
         self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
         for name in self.collect_param_names(&function.params) {
             self.declare_name(&name, false);
         }
@@ -403,6 +693,7 @@ impl Emitter {
         self.type_scopes.pop();
         self.function_scopes.pop();
         self.value_type_scopes.pop();
+        self.state_scopes.pop();
 
         let return_type = function
             .return_type
@@ -432,6 +723,7 @@ impl Emitter {
         self.type_scopes.push(HashMap::new());
         self.function_scopes.push(HashMap::new());
         self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
         for name in self.collect_param_names(&function.params) {
             self.declare_name(&name, false);
         }
@@ -445,6 +737,7 @@ impl Emitter {
         self.type_scopes.pop();
         self.function_scopes.pop();
         self.value_type_scopes.pop();
+        self.state_scopes.pop();
 
         let signature = format!(
             "local function {}{emitted_generics}({}): thread",
@@ -524,6 +817,7 @@ impl Emitter {
         self.type_scopes.push(HashMap::new());
         self.function_scopes.push(HashMap::new());
         self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
         for name in self.collect_param_names(&method.params) {
             self.declare_name(&name, false);
         }
@@ -539,6 +833,7 @@ impl Emitter {
         self.type_scopes.pop();
         self.function_scopes.pop();
         self.value_type_scopes.pop();
+        self.state_scopes.pop();
 
         let mut parts = vec![self.indent(indent, &header)];
         for line in prologue {
@@ -603,6 +898,7 @@ impl Emitter {
         self.type_scopes.push(HashMap::new());
         self.function_scopes.push(HashMap::new());
         self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
         for name in self.collect_param_names(&method.params) {
             self.declare_name(&name, false);
         }
@@ -618,6 +914,7 @@ impl Emitter {
         self.type_scopes.pop();
         self.function_scopes.pop();
         self.value_type_scopes.pop();
+        self.state_scopes.pop();
 
         let mut parts = vec![self.indent(indent, &header)];
         for line in prologue {
@@ -789,10 +1086,26 @@ impl Emitter {
         if values.is_empty() {
             values.push("nil".to_string());
         }
-        parts.push(self.indent(
-            indent,
-            &format!("{} = {}", targets.join(", "), values.join(", ")),
-        ));
+        let assignment_line = format!("{} = {}", targets.join(", "), values.join(", "));
+        let watched = self.collect_state_target_watchers(&assignment.targets);
+        if !watched.is_empty() {
+            parts.push(self.indent(indent, "do"));
+            for (name, _, old_name) in &watched {
+                parts.push(self.indent(indent + 1, &format!("local {old_name} = {name}")));
+            }
+            parts.push(self.indent(indent + 1, &assignment_line));
+            for (name, watchers_name, old_name) in watched {
+                parts.extend(self.render_state_notification_block(
+                    &watchers_name,
+                    &old_name,
+                    &name,
+                    indent + 1,
+                ));
+            }
+            parts.push(self.indent(indent, "end"));
+        } else {
+            parts.push(self.indent(indent, &assignment_line));
+        }
         Ok(parts.join("\n"))
     }
 
@@ -808,13 +1121,31 @@ impl Emitter {
         self.push_setup(&mut parts, indent, lowered_target.setup);
         let lowered_value = self.emit_expr(value, None)?;
         let target_expr = lowered_target.expr.clone();
-        parts.push(self.indent(indent, &format!("if {target_expr} == nil then")));
-        self.push_setup(&mut parts, indent + 1, lowered_value.setup);
-        parts.push(self.indent(
-            indent + 1,
-            &format!("{target_expr} = {}", lowered_value.expr),
-        ));
-        parts.push(self.indent(indent, "end"));
+        if let Some(state) = self.state_target_binding(target).cloned() {
+            let old_name = self.next_temp("old");
+            parts.push(self.indent(indent, &format!("if {target_expr} == nil then")));
+            parts.push(self.indent(indent + 1, &format!("local {old_name} = {target_expr}")));
+            self.push_setup(&mut parts, indent + 1, lowered_value.setup);
+            parts.push(self.indent(
+                indent + 1,
+                &format!("{target_expr} = {}", lowered_value.expr),
+            ));
+            parts.extend(self.render_state_notification_block(
+                &state.watchers_name,
+                &old_name,
+                &target_expr,
+                indent + 1,
+            ));
+            parts.push(self.indent(indent, "end"));
+        } else {
+            parts.push(self.indent(indent, &format!("if {target_expr} == nil then")));
+            self.push_setup(&mut parts, indent + 1, lowered_value.setup);
+            parts.push(self.indent(
+                indent + 1,
+                &format!("{target_expr} = {}", lowered_value.expr),
+            ));
+            parts.push(self.indent(indent, "end"));
+        }
         Ok(parts.join("\n"))
     }
 
@@ -831,15 +1162,37 @@ impl Emitter {
         self.push_setup(&mut parts, indent, lowered_target.setup);
         let target_expr = lowered_target.expr.clone();
         let lowered_value = self.emit_expr(value, None)?;
-        self.push_setup(&mut parts, indent, lowered_value.setup);
-        parts.push(self.indent(
-            indent,
-            &format!(
-                "{target_expr} = {target_expr} {} {}",
-                compound_token(op),
-                lowered_value.expr
-            ),
-        ));
+        if let Some(state) = self.state_target_binding(target).cloned() {
+            let old_name = self.next_temp("old");
+            parts.push(self.indent(indent, "do"));
+            parts.push(self.indent(indent + 1, &format!("local {old_name} = {target_expr}")));
+            self.push_setup(&mut parts, indent + 1, lowered_value.setup);
+            parts.push(self.indent(
+                indent + 1,
+                &format!(
+                    "{target_expr} = {target_expr} {} {}",
+                    compound_token(op),
+                    lowered_value.expr
+                ),
+            ));
+            parts.extend(self.render_state_notification_block(
+                &state.watchers_name,
+                &old_name,
+                &target_expr,
+                indent + 1,
+            ));
+            parts.push(self.indent(indent, "end"));
+        } else {
+            self.push_setup(&mut parts, indent, lowered_value.setup);
+            parts.push(self.indent(
+                indent,
+                &format!(
+                    "{target_expr} = {target_expr} {} {}",
+                    compound_token(op),
+                    lowered_value.expr
+                ),
+            ));
+        }
         Ok(parts.join("\n"))
     }
 
@@ -928,6 +1281,7 @@ impl Emitter {
         self.type_scopes.push(HashMap::new());
         self.function_scopes.push(HashMap::new());
         self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
         for param in &handler.params {
             self.declare_name(param, false);
         }
@@ -941,6 +1295,7 @@ impl Emitter {
         self.type_scopes.pop();
         self.function_scopes.pop();
         self.value_type_scopes.pop();
+        self.state_scopes.pop();
         if !body.is_empty() {
             lines.extend(body.lines().map(ToString::to_string));
         }
@@ -1553,7 +1908,25 @@ impl Emitter {
             Expr::Comprehension(comprehension) => {
                 self.emit_comprehension_expr(comprehension, placeholder)
             }
+            Expr::SignalHandler(handler) => self.emit_signal_handler_expr(handler),
         }
+    }
+
+    fn emit_signal_handler_expr(&mut self, handler: &SignalHandlerExpr) -> Result<LoweredExpr> {
+        let temp = self.next_temp("conn");
+        let rendered = self.emit_signal_handler_call(
+            &handler.signal,
+            &handler.params,
+            &handler.body,
+            handler.once,
+            0,
+            Some(&temp),
+        )?;
+        Ok(LoweredExpr {
+            setup: rendered.lines().map(ToString::to_string).collect(),
+            expr: temp,
+            reuse_safe: true,
+        })
     }
 
     fn emit_binary_expr(
@@ -1858,6 +2231,7 @@ impl Emitter {
         self.type_scopes.push(HashMap::new());
         self.function_scopes.push(HashMap::new());
         self.value_type_scopes.push(HashMap::new());
+        self.state_scopes.push(HashMap::new());
         for name in self.collect_param_names(&function.params) {
             self.declare_name(&name, false);
         }
@@ -1867,6 +2241,7 @@ impl Emitter {
         self.type_scopes.pop();
         self.function_scopes.pop();
         self.value_type_scopes.pop();
+        self.state_scopes.pop();
         let return_type = function
             .return_type
             .as_ref()
@@ -3020,6 +3395,77 @@ impl Emitter {
         None
     }
 
+    fn lookup_state_binding(&self, name: &str) -> Option<&StateBinding> {
+        for scope in self.state_scopes.iter().rev() {
+            if let Some(binding) = scope.get(name) {
+                return Some(binding);
+            }
+        }
+        None
+    }
+
+    fn register_state_binding(&mut self, name: &str, watchers_name: &str, value_type: &str) {
+        if let Some(scope) = self.state_scopes.last_mut() {
+            scope.insert(
+                name.to_string(),
+                StateBinding {
+                    watchers_name: watchers_name.to_string(),
+                    value_type: value_type.to_string(),
+                },
+            );
+        }
+    }
+
+    fn state_target_binding(&self, target: &AssignTarget) -> Option<&StateBinding> {
+        match target {
+            AssignTarget::Name(name) => self.lookup_state_binding(name),
+            AssignTarget::Field { .. } | AssignTarget::Index { .. } => None,
+        }
+    }
+
+    fn collect_state_target_watchers(
+        &mut self,
+        targets: &[AssignTarget],
+    ) -> Vec<(String, String, String)> {
+        let mut watched = Vec::new();
+        for target in targets {
+            let AssignTarget::Name(name) = target else {
+                continue;
+            };
+            let Some(binding) = self.lookup_state_binding(name).cloned() else {
+                continue;
+            };
+            let old_name = self.next_temp("old");
+            watched.push((name.clone(), binding.watchers_name, old_name));
+        }
+        watched
+    }
+
+    fn render_state_notification_block(
+        &self,
+        watchers_name: &str,
+        old_name: &str,
+        current_name: &str,
+        indent: usize,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(self.indent(
+            indent,
+            &format!("if {current_name} ~= {old_name} then"),
+        ));
+        lines.push(self.indent(
+            indent + 1,
+            &format!("for _, _w in {watchers_name} do"),
+        ));
+        lines.push(self.indent(
+            indent + 2,
+            &format!("_w({old_name}, {current_name})"),
+        ));
+        lines.push(self.indent(indent + 1, "end"));
+        lines.push(self.indent(indent, "end"));
+        lines
+    }
+
     fn register_enum_type(&mut self, decl: &EnumDecl) {
         let mut values = Vec::new();
         let mut members = HashMap::new();
@@ -3514,6 +3960,7 @@ impl Emitter {
                 }
             },
             Expr::Function(_)
+            | Expr::SignalHandler(_)
             | Expr::Nil
             | Expr::Bool(_)
             | Expr::Number(_)
