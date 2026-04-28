@@ -3,7 +3,10 @@ type User = { id: number, name: string }
 type Result<T, E = string> =
     { ok: true, value: T }
     | { ok: false, error: E }
-type Settings = { timeout: number, retries: number }
+type Settings = {
+    read timeout: number,
+    retries: number,
+}
 type Direction = "North" | "South"
 local Direction = table.freeze({
     North = "North" :: Direction,
@@ -23,7 +26,10 @@ local function max<T>(a: (T & Comparable), b: (T & Comparable)): T
     return _ifexpr0
 end
 local DEFAULTS = table.freeze({timeout = 30, retries = 2})
-type FrozenSettings = { timeout: number, retries: number }
+type FrozenSettings = {
+    read timeout: number,
+    read retries: number,
+}
 type SettingFlags = { fast: boolean, safe: boolean }
 local config = {}
 local _v2 = DEFAULTS

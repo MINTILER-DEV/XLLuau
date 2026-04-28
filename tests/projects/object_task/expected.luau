@@ -1,4 +1,4 @@
-type Animal = { name: string, sound: string, speak: (Animal) -> string }
+type Animal = { name: string, sound: string, speak: (self: Animal) -> string }
 local Animal = {}
 Animal.__index = Animal
 function Animal.new(name: string, sound: string): Animal
@@ -10,7 +10,7 @@ end
 function Animal:speak(): string
     return self.sound
 end
-type Dog = Animal & { breed: string, speak: (Dog) -> string }
+type Dog = Animal & { breed: string, speak: (self: Dog) -> string }
 local Dog = {}
 Dog.__index = Dog
 setmetatable(Dog, { __index = Animal })

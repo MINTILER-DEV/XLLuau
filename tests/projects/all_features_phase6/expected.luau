@@ -5,7 +5,7 @@ local Direction = table.freeze({
     North = "North" :: Direction,
     South = "South" :: Direction,
 })
-type Hero = { name: string, score: number, label: (Hero) -> string }
+type Hero = { name: string, score: number, label: (self: Hero) -> string }
 local Hero = {}
 Hero.__index = Hero
 function Hero.new(name: string, score: number): Hero

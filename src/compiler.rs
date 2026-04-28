@@ -162,7 +162,10 @@ impl Compiler {
 
     fn validate_luau(&self, source: &str) -> Result<()> {
         let cst = Self::parse_luau(source, "<memory>");
-        if cst.errors.is_empty() || Self::wrapped_chunk_is_valid(source) {
+        if cst.errors.is_empty()
+            || Self::wrapped_chunk_is_valid(source)
+            || Self::validation_shadow_is_valid(source)
+        {
             Ok(())
         } else {
             Err(CompilerError::Validation {
@@ -186,6 +189,41 @@ impl Compiler {
         Self::parse_luau(&wrapped, "<memory:wrapped>")
             .errors
             .is_empty()
+    }
+
+    fn validation_shadow_is_valid(source: &str) -> bool {
+        let shadow = Self::sanitize_readonly_type_fields(source);
+        shadow != source
+            && (Self::parse_luau(&shadow, "<memory:shadow>").errors.is_empty()
+                || Self::wrapped_chunk_is_valid(&shadow))
+    }
+
+    fn sanitize_readonly_type_fields(source: &str) -> String {
+        let mut lines = source
+            .lines()
+            .map(|line| {
+                let indent_len = line.len().saturating_sub(line.trim_start().len());
+                let (indent, trimmed) = line.split_at(indent_len);
+                if let Some(rest) = trimmed.strip_prefix("read ")
+                    && let Some(colon_index) = rest.find(':')
+                {
+                    let key = rest[..colon_index].trim();
+                    if !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '"' | '\''))
+                    {
+                        return format!("{indent}{rest}");
+                    }
+                }
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if source.ends_with('\n') {
+            lines.push('\n');
+        }
+        lines
     }
 
     fn compile_source_with_path(&self, source: &str, path: &Path) -> Result<String> {
@@ -710,6 +748,7 @@ end
 
 type UserResult = ReturnType<typeof(fetchUser)>
 type FetchParams = Parameters<typeof(fetchUser)>
+type RetrySnapshot = Partial<Readonly<Pick<Config, "timeout">>>
 
 const DEFAULTS = freeze {
     timeout = 30,
@@ -720,15 +759,16 @@ const DEFAULTS = freeze {
 type Defaults = Readonly<typeof(DEFAULTS)>
 "#;
         let output = compiler().compile_source(source).unwrap();
-        assert!(output.contains("type Config = { host: string, port: number, timeout: number? }"));
-        assert!(output.contains("type PartialConfig = { host: string?, port: number?, timeout: number? }"));
-        assert!(output.contains("type HostConfig = { host: string, port: number }"));
+        assert!(output.contains("type Config = {\n    read host: string,\n    port: number,\n    timeout: number?,\n}"));
+        assert!(output.contains("type PartialConfig = {\n    read host: string?,\n    port: number?,\n    timeout: number?,\n}"));
+        assert!(output.contains("type HostConfig = {\n    read host: string,\n    port: number,\n}"));
         assert!(output.contains("type Flags = { debug: boolean, verbose: boolean }"));
         assert!(output.contains("type Present = \"ok\" | \"err\""));
         assert!(output.contains("type UserResult = User"));
         assert!(output.contains("type FetchParams = (string, number)"));
+        assert!(output.contains("type RetrySnapshot = {\n    read timeout: number?,\n}"));
         assert!(output.contains("local DEFAULTS = table.freeze({timeout = 30, retries = 3, host = \"localhost\"})"));
-        assert!(output.contains("type Defaults = { timeout: number, retries: number, host: string }"));
+        assert!(output.contains("type Defaults = {\n    read timeout: number,\n    read retries: number,\n    read host: string,\n}"));
     }
 
     #[test]
@@ -755,9 +795,33 @@ type Config = {
 
         let compiler = Compiler::discover(&root).unwrap();
         let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
-        assert!(artifact.luau.contains("type Config = { host: string, port: number }"));
+        assert!(artifact.luau.contains("type Config = {\n    host: string,  -- @readonly (XLuau-enforced)\n    port: number,\n}"));
         assert!(!artifact.luau.contains("readonly host"));
         assert!(!artifact.luau.contains("read host"));
+    }
+
+    #[test]
+    fn utility_types_resolve_object_signatures() {
+        let source = r#"
+object Hero
+    name: string
+
+    function new(name: string): Hero
+        self.name = name
+    end
+
+    function label(prefix: string): string
+        return prefix .. self.name
+    end
+end
+
+type HeroCtor = ReturnType<typeof(Hero.new)>
+type HeroLabelArgs = Parameters<typeof(Hero.label)>
+"#;
+        let output = compiler().compile_source(source).unwrap();
+        assert!(output.contains("type Hero = { name: string, label: (self: Hero, string) -> string }"));
+        assert!(output.contains("type HeroCtor = Hero"));
+        assert!(output.contains("type HeroLabelArgs = (Hero, string)"));
     }
 
     #[test]
@@ -795,14 +859,14 @@ object Dog extends Animal
 end
 "#;
         let output = compiler().compile_source(source).unwrap();
-        assert!(output.contains("type Animal = { name: string, sound: string, speak: (Animal) -> string }"));
+        assert!(output.contains("type Animal = { name: string, sound: string, speak: (self: Animal) -> string }"));
         assert!(output.contains("local Animal = {}"));
         assert!(output.contains("Animal.__index = Animal"));
         assert!(output.contains("function Animal.new(name: string, sound: string): Animal"));
         assert!(output.contains("local self = setmetatable({} :: Animal, Animal)"));
         assert!(output.contains("function Animal:speak(): string"));
         assert!(output.contains("function Animal.create(name: string): Animal"));
-        assert!(output.contains("type Dog = Animal & { breed: string, speak: (Dog) -> string }"));
+        assert!(output.contains("type Dog = Animal & { breed: string, speak: (self: Dog) -> string }"));
         assert!(output.contains("setmetatable(Dog, { __index = Animal })"));
         assert!(output.contains("local self = Animal.new(name, \"Woof\") :: Dog"));
         assert!(output.contains("setmetatable(self, Dog)"));

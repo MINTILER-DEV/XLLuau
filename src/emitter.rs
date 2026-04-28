@@ -7,7 +7,7 @@ use crate::{
 
 pub struct Emitter {
     temp_counter: usize,
-    _luau_target: String,
+    luau_target: String,
     spawn_uses_roblox: bool,
     const_scopes: Vec<HashSet<String>>,
     type_scopes: Vec<HashMap<String, String>>,
@@ -67,10 +67,23 @@ struct FunctionSignature {
 }
 
 #[derive(Debug, Clone)]
+struct TableTypeFieldSpec {
+    key: String,
+    value: String,
+    readonly: bool,
+}
+
+#[derive(Debug, Clone)]
 struct ObjectContext {
     _class_name: String,
     parent_name: Option<String>,
     _in_constructor: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeRenderMode {
+    Visible,
+    Canonical,
 }
 
 impl Emitter {
@@ -81,7 +94,7 @@ impl Emitter {
     pub fn with_options(luau_target: impl Into<String>, spawn_uses_roblox: bool) -> Self {
         Self {
             temp_counter: 0,
-            _luau_target: luau_target.into(),
+            luau_target: luau_target.into(),
             spawn_uses_roblox,
             const_scopes: vec![HashSet::new()],
             type_scopes: vec![HashMap::new()],
@@ -177,8 +190,8 @@ impl Emitter {
             }
             Stmt::Spawn(spawn) => self.emit_spawn_stmt(spawn, indent),
             Stmt::TypeAlias { raw } => {
+                self.register_type_alias(raw);
                 let rewritten = self.rewrite_type_alias(raw);
-                self.register_type_alias(&rewritten);
                 Ok(self.indent(indent, &rewritten))
             }
         }
@@ -657,7 +670,7 @@ impl Emitter {
             .into_iter()
             .map(|generic| generic.name)
             .collect::<Vec<_>>();
-        let mut params = vec![object.name.clone()];
+        let mut params = vec![format!("self: {}", object.name)];
         for param in &method.params {
             match param {
                 Param::Binding(binding) => params.push(
@@ -2408,10 +2421,10 @@ impl Emitter {
         for stmt in block {
             match stmt {
                 Stmt::Function(function) => self.register_function_signature(function),
+                Stmt::Object(object) => self.register_object_signatures(object),
                 Stmt::Enum(decl) => self.register_enum_type(decl),
                 Stmt::TypeAlias { raw } => {
-                    let rewritten = self.rewrite_type_alias(raw);
-                    self.register_type_alias(&rewritten);
+                    self.register_type_alias(raw);
                 }
                 _ => {}
             }
@@ -2428,12 +2441,12 @@ impl Emitter {
                 Param::Binding(binding) => binding.type_annotation.clone(),
                 Param::VarArg(annotation) => annotation.clone(),
             })
-            .map(|annotation| annotation.map(|text| self.rewrite_type_text(&text)))
+            .map(|annotation| annotation.map(|text| self.rewrite_type_text_canonical(&text)))
             .collect::<Vec<_>>();
         let return_type = function
             .return_type
             .as_ref()
-            .map(|text| self.rewrite_type_text(text));
+            .map(|text| self.rewrite_type_text_canonical(text));
         if let Some(scope) = self.function_scopes.last_mut() {
             scope.insert(
                 key,
@@ -2443,6 +2456,44 @@ impl Emitter {
                     return_type,
                 },
             );
+        }
+    }
+
+    fn register_object_signatures(&mut self, object: &ObjectDecl) {
+        let mut registrations = Vec::new();
+        for method in &object.methods {
+            let generics = self.parse_generic_params(method.generics.as_deref());
+            let mut params = Vec::new();
+            if !method.is_static && method.name != "new" {
+                params.push(Some(object.name.clone()));
+            }
+            params.extend(method.params.iter().map(|param| match param {
+                Param::Binding(binding) => binding
+                    .type_annotation
+                    .clone()
+                    .map(|text| self.rewrite_type_text_canonical(&text)),
+                Param::VarArg(annotation) => annotation
+                    .clone()
+                    .map(|text| self.rewrite_type_text_canonical(&text)),
+            }));
+            let return_type = method
+                .return_type
+                .as_ref()
+                .map(|text| self.rewrite_type_text_canonical(text));
+            registrations.push((
+                format!("{}.{}", object.name, method.name),
+                FunctionSignature {
+                    generics,
+                    params,
+                    return_type,
+                },
+            ));
+        }
+
+        if let Some(scope) = self.function_scopes.last_mut() {
+            for (key, signature) in registrations {
+                scope.insert(key, signature);
+            }
         }
     }
 
@@ -2540,29 +2591,28 @@ impl Emitter {
         let rhs = rest[eq_index + 1..].trim();
         let rewritten_rhs = self.rewrite_type_text(rhs);
 
-        let alias_name = left
-            .split('<')
-            .next()
-            .map(str::trim)
-            .unwrap_or(left)
-            .to_string();
-        self.type_alias_bodies
-            .insert(alias_name, rewritten_rhs.clone());
-
         format!("{export_prefix}type {left} = {rewritten_rhs}")
     }
 
     fn rewrite_type_text(&self, text: &str) -> String {
+        self.rewrite_type_text_mode(text, TypeRenderMode::Visible)
+    }
+
+    fn rewrite_type_text_canonical(&self, text: &str) -> String {
+        self.rewrite_type_text_mode(text, TypeRenderMode::Canonical)
+    }
+
+    fn rewrite_type_text_mode(&self, text: &str, mode: TypeRenderMode) -> String {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return String::new();
         }
 
-        if let Some(expanded) = self.expand_builtin_type_utility(trimmed) {
+        if let Some(expanded) = self.expand_builtin_type_utility_mode(trimmed, mode) {
             return expanded;
         }
         if trimmed.starts_with('{') && trimmed.ends_with('}') {
-            return self.rewrite_table_type(trimmed);
+            return self.rewrite_table_type_mode(trimmed, mode);
         }
         trimmed.to_string()
     }
@@ -2613,97 +2663,133 @@ impl Emitter {
         output
     }
 
-    fn rewrite_table_type(&self, text: &str) -> String {
+    fn rewrite_table_type_mode(&self, text: &str, mode: TypeRenderMode) -> String {
         let inner = &text[1..text.len() - 1];
-        let mut parts = Vec::new();
+        let mut fields = Vec::new();
         for piece in self.split_top_level(inner, ',') {
             let field = piece.trim();
             if field.is_empty() {
                 continue;
             }
-            parts.push(self.rewrite_table_type_field(field));
+            if let Some(field) = self.parse_table_type_field_spec(field, mode) {
+                fields.push(field);
+            } else {
+                return text.to_string();
+            }
         }
-        format!("{{ {} }}", parts.join(", "))
+        self.render_table_type_specs_mode(&fields, mode)
     }
 
-    fn rewrite_table_type_field(&self, field: &str) -> String {
+    fn parse_table_type_field_spec(
+        &self,
+        field: &str,
+        mode: TypeRenderMode,
+    ) -> Option<TableTypeFieldSpec> {
         let mut text = field.trim();
         let mut readonly = false;
         if let Some(rest) = text.strip_prefix("readonly ") {
             readonly = true;
             text = rest.trim();
+        } else if let Some(rest) = text.strip_prefix("read ") {
+            readonly = true;
+            text = rest.trim();
         }
-        let Some(colon_index) = text.find(':') else {
-            return text.to_string();
-        };
+        let colon_index = text.find(':')?;
         let key = text[..colon_index].trim();
-        let value = self.rewrite_type_text(text[colon_index + 1..].trim());
-        let prefix = if readonly {
-            ""
-        } else {
-            ""
-        };
-        format!("{prefix}{key}: {value}")
+        let value = self.rewrite_type_text_mode(text[colon_index + 1..].trim(), mode);
+        Some(TableTypeFieldSpec {
+            key: key.to_string(),
+            value,
+            readonly,
+        })
     }
 
-    fn expand_builtin_type_utility(&self, text: &str) -> Option<String> {
+    fn expand_builtin_type_utility_mode(
+        &self,
+        text: &str,
+        mode: TypeRenderMode,
+    ) -> Option<String> {
         let (name, args) = self.parse_type_application(text)?;
         match name.as_str() {
             "Partial" => {
                 let fields = self.resolve_table_type_fields(args.first()?.trim())?;
-                Some(self.render_table_type(
+                Some(self.render_table_type_specs_mode(
                     &fields
                         .into_iter()
-                        .map(|(key, value)| (key, self.make_optional_type(&value)))
+                        .map(|field| TableTypeFieldSpec {
+                            key: field.key,
+                            value: self.make_optional_type(&field.value),
+                            readonly: field.readonly,
+                        })
                         .collect::<Vec<_>>(),
+                    mode,
                 ))
             }
             "Required" => {
                 let fields = self.resolve_table_type_fields(args.first()?.trim())?;
-                Some(self.render_table_type(
+                Some(self.render_table_type_specs_mode(
                     &fields
                         .into_iter()
-                        .map(|(key, value)| (key, self.remove_optional_type(&value)))
+                        .map(|field| TableTypeFieldSpec {
+                            key: field.key,
+                            value: self.remove_optional_type(&field.value),
+                            readonly: field.readonly,
+                        })
                         .collect::<Vec<_>>(),
+                    mode,
                 ))
             }
             "Readonly" => {
                 let fields = self.resolve_table_type_fields(args.first()?.trim())?;
-                let rendered = fields
-                    .into_iter()
-                    .map(|(key, value)| format!("{key}: {value}"))
-                    .collect::<Vec<_>>();
-                Some(format!("{{ {} }}", rendered.join(", ")))
+                Some(self.render_table_type_specs_mode(
+                    &fields
+                        .into_iter()
+                        .map(|field| TableTypeFieldSpec {
+                            readonly: true,
+                            ..field
+                        })
+                        .collect::<Vec<_>>(),
+                    mode,
+                ))
             }
             "Pick" => {
                 let fields = self.resolve_table_type_fields(args.first()?.trim())?;
                 let keys = self.parse_string_literal_union(args.get(1)?.trim())?;
                 let kept = fields
                     .into_iter()
-                    .filter(|(key, _)| keys.iter().any(|candidate| candidate == key))
+                    .filter(|field| keys.iter().any(|candidate| candidate == &field.key))
                     .collect::<Vec<_>>();
-                Some(self.render_table_type(&kept))
+                Some(self.render_table_type_specs_mode(&kept, mode))
             }
             "Omit" => {
                 let fields = self.resolve_table_type_fields(args.first()?.trim())?;
                 let keys = self.parse_string_literal_union(args.get(1)?.trim())?;
                 let kept = fields
                     .into_iter()
-                    .filter(|(key, _)| !keys.iter().any(|candidate| candidate == key))
+                    .filter(|field| !keys.iter().any(|candidate| candidate == &field.key))
                     .collect::<Vec<_>>();
-                Some(self.render_table_type(&kept))
+                Some(self.render_table_type_specs_mode(&kept, mode))
             }
             "Record" => {
                 let key_arg = args.first()?.trim();
-                let value_arg = self.rewrite_type_text(args.get(1)?.trim());
+                let value_arg = self.rewrite_type_text_mode(args.get(1)?.trim(), mode);
                 if let Some(keys) = self.parse_string_literal_union(key_arg) {
-                    Some(self.render_table_type(
+                    Some(self.render_table_type_specs_mode(
                         &keys.into_iter()
-                            .map(|key| (key, value_arg.clone()))
+                            .map(|key| TableTypeFieldSpec {
+                                key,
+                                value: value_arg.clone(),
+                                readonly: false,
+                            })
                             .collect::<Vec<_>>(),
+                        mode,
                     ))
                 } else {
-                    Some(format!("{{ [{}]: {} }}", self.rewrite_type_text(key_arg), value_arg))
+                    Some(format!(
+                        "{{ [{}]: {} }}",
+                        self.rewrite_type_text_mode(key_arg, mode),
+                        value_arg
+                    ))
                 }
             }
             "Exclude" => {
@@ -2773,10 +2859,18 @@ impl Emitter {
         Some(inner.trim().to_string())
     }
 
-    fn resolve_table_type_fields(&self, text: &str) -> Option<Vec<(String, String)>> {
+    fn resolve_table_type_fields(&self, text: &str) -> Option<Vec<TableTypeFieldSpec>> {
         let trimmed = text.trim();
         if trimmed.starts_with('{') && trimmed.ends_with('}') {
             return self.parse_table_type_fields(trimmed);
+        }
+        let expanded = self.rewrite_type_text_canonical(trimmed);
+        if expanded != trimmed
+            && expanded.starts_with('{')
+            && expanded.ends_with('}')
+            && let Some(fields) = self.parse_table_type_fields(&expanded)
+        {
+            return Some(fields);
         }
         if let Some(name) = self.parse_typeof_target(trimmed)
             && let Some(value_type) = self.lookup_value_type(&name)
@@ -2785,10 +2879,11 @@ impl Emitter {
         }
         let alias_name = self.simple_type_name(trimmed)?;
         let alias_body = self.type_alias_bodies.get(&alias_name)?;
-        self.parse_table_type_fields(alias_body)
+        let expanded_alias = self.rewrite_type_text_canonical(alias_body);
+        self.parse_table_type_fields(&expanded_alias)
     }
 
-    fn parse_table_type_fields(&self, text: &str) -> Option<Vec<(String, String)>> {
+    fn parse_table_type_fields(&self, text: &str) -> Option<Vec<TableTypeFieldSpec>> {
         let trimmed = text.trim();
         let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?;
         let mut fields = Vec::new();
@@ -2797,28 +2892,85 @@ impl Emitter {
             if field.is_empty() {
                 continue;
             }
-            let field = field
-                .strip_prefix("readonly ")
-                .or_else(|| field.strip_prefix("read "))
-                .unwrap_or(field)
-                .trim();
-            let colon_index = field.find(':')?;
-            let key = field[..colon_index].trim().trim_matches('"').to_string();
-            let value = self.rewrite_type_text(field[colon_index + 1..].trim());
-            fields.push((key, value));
+            let spec = self.parse_table_type_field_spec(field, TypeRenderMode::Canonical)?;
+            fields.push(TableTypeFieldSpec {
+                key: spec.key.trim_matches('"').to_string(),
+                value: spec.value,
+                readonly: spec.readonly,
+            });
         }
         Some(fields)
     }
 
-    fn render_table_type(&self, fields: &[(String, String)]) -> String {
+    fn render_table_type_canonical(&self, fields: &[(String, String)]) -> String {
+        self.render_table_type_specs_mode(
+            &fields
+                .iter()
+                .map(|(key, value)| TableTypeFieldSpec {
+                    key: key.clone(),
+                    value: value.clone(),
+                    readonly: false,
+                })
+                .collect::<Vec<_>>(),
+            TypeRenderMode::Canonical,
+        )
+    }
+
+    fn render_table_type_specs_mode(
+        &self,
+        fields: &[TableTypeFieldSpec],
+        mode: TypeRenderMode,
+    ) -> String {
+        if fields.is_empty() {
+            return "{ }".to_string();
+        }
+
+        let has_readonly = fields.iter().any(|field| field.readonly);
+        if mode == TypeRenderMode::Visible && has_readonly {
+            let mut lines = vec!["{".to_string()];
+            for field in fields {
+                let mut rendered = self.render_single_table_field(field, mode);
+                rendered.push(',');
+                if field.readonly && self.uses_legacy_readonly_annotations() {
+                    rendered.push_str("  -- @readonly (XLuau-enforced)");
+                }
+                lines.push(format!("    {rendered}"));
+            }
+            lines.push("}".to_string());
+            return lines.join("\n");
+        }
+
         format!(
             "{{ {} }}",
             fields
                 .iter()
-                .map(|(key, value)| format!("{key}: {value}"))
+                .map(|field| self.render_single_table_field(field, mode))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
+    }
+
+    fn render_single_table_field(
+        &self,
+        field: &TableTypeFieldSpec,
+        mode: TypeRenderMode,
+    ) -> String {
+        let prefix = match mode {
+            TypeRenderMode::Canonical if field.readonly => "readonly ",
+            TypeRenderMode::Visible if field.readonly && self.uses_new_solver_readonly() => {
+                "read "
+            }
+            _ => "",
+        };
+        format!("{prefix}{}: {}", field.key, field.value)
+    }
+
+    fn uses_new_solver_readonly(&self) -> bool {
+        self.luau_target.trim() != "legacy"
+    }
+
+    fn uses_legacy_readonly_annotations(&self) -> bool {
+        self.luau_target.trim() == "legacy"
     }
 
     fn make_optional_type(&self, text: &str) -> String {
@@ -2907,7 +3059,7 @@ impl Emitter {
                 .unwrap_or_default()
                 .trim()
                 .to_string();
-            let rhs = rest[eq_index + 1..].trim().to_string();
+            let rhs = self.rewrite_type_text_canonical(rest[eq_index + 1..].trim());
             if !name.is_empty() {
                 self.type_alias_bodies.insert(name, rhs);
             }
@@ -3086,7 +3238,7 @@ impl Emitter {
     fn declare_pattern_types(&mut self, pattern: &Pattern, annotation: &Option<String>) {
         let Some(type_name) = annotation
             .as_ref()
-            .map(|annotation| self.rewrite_type_text(annotation))
+            .map(|annotation| self.rewrite_type_text_canonical(annotation))
             .and_then(|annotation| self.simple_type_name(&annotation))
         else {
             return;
@@ -3455,9 +3607,20 @@ impl Emitter {
 
     fn infer_value_type(&self, expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Freeze(inner) => self
-                .infer_value_type(inner)
-                .map(|text| self.expand_builtin_type_utility(&format!("Readonly<{text}>")).unwrap_or(text)),
+            Expr::Freeze(inner) => {
+                let inner_type = self.infer_value_type(inner)?;
+                let fields = self.resolve_table_type_fields(&inner_type)?;
+                Some(self.render_table_type_specs_mode(
+                    &fields
+                        .into_iter()
+                        .map(|field| TableTypeFieldSpec {
+                            readonly: true,
+                            ..field
+                        })
+                        .collect::<Vec<_>>(),
+                    TypeRenderMode::Canonical,
+                ))
+            }
             Expr::Table(fields) => {
                 let mut typed_fields = Vec::new();
                 for field in fields {
@@ -3473,7 +3636,7 @@ impl Emitter {
                     };
                     typed_fields.push((name.clone(), value_type));
                 }
-                Some(self.render_table_type(&typed_fields))
+                Some(self.render_table_type_canonical(&typed_fields))
             }
             _ => None,
         }

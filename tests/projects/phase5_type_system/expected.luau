@@ -2,9 +2,20 @@ type Comparable = number
 type User = { id: number, name: string }
 type Result<T, E> = { ok: true, value: T }
     | { ok: false, error: E }
-type Config = { host: string, port: number, timeout: number? }
-type PartialConfig = { host: string?, port: number?, timeout: number? }
-type HostConfig = { host: string, port: number }
+type Config = {
+    read host: string,
+    port: number,
+    timeout: number?,
+}
+type PartialConfig = {
+    read host: string?,
+    port: number?,
+    timeout: number?,
+}
+type HostConfig = {
+    read host: string,
+    port: number,
+}
 type Flags = { debug: boolean, verbose: boolean }
 type Present = "ok" | "err"
 local function max<T>(a: (T & Comparable), b: (T & Comparable)): T
@@ -29,5 +40,9 @@ local best = max(scoreA, scoreB)
 local empty = ((makeEmpty :: () -> { x: number, y: number }))()
 local user = ((fetch :: (string) -> Result<User, string>))("/api/user")
 local DEFAULTS = table.freeze({host = "localhost", port = 80, timeout = 30})
-type Defaults = { host: string, port: number, timeout: number }
+type Defaults = {
+    read host: string,
+    read port: number,
+    read timeout: number,
+}
 return best, empty, user, DEFAULTS
