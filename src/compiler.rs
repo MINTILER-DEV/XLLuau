@@ -78,6 +78,10 @@ impl Compiler {
         Ok(self.compile_source_with_path(source, Path::new("<memory>"))?.luau)
     }
 
+    pub fn compile_source_at_path(&self, source: &str, path: &Path) -> Result<String> {
+        Ok(self.compile_source_with_path(source, path)?.luau)
+    }
+
     pub fn build_file(&self, path: &Path) -> Result<BuildArtifact> {
         let input = if path.is_absolute() {
             path.to_path_buf()
