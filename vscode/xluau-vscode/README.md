@@ -4,6 +4,11 @@ This extension adds:
 
 - `.xl` language registration
 - syntax highlighting
+- completions
+- hover
+- go to definition
+- rename
+- quick fixes
 - formatting through `xluau-lsp`
 - diagnostics through `xluau-lsp`
 
@@ -31,3 +36,9 @@ By default the extension tries:
 - `xluau-lsp` on your `PATH`
 
 You can override that with the `xluau.server.path` setting.
+
+## Current Behavior Notes
+
+- definitions for `require("@alias/...")` jump to the resolved source file, including index files like `init.xl`
+- rename currently supports current-file declaration names and project-wide `require(...)` specifier strings
+- quick fixes currently cover `const` to `local`, plus fallback branches for non-exhaustive `switch` and `match`

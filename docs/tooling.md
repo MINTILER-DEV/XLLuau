@@ -60,15 +60,23 @@ cargo build --bin xluau-lsp
 
 - parse and validation diagnostics for open `.xl` files
 - document formatting through the same formatter used by `xluau fmt`
-- top-level document symbols for functions, objects, enums, signals, state, and type aliases
+- top-level document symbols for functions, objects, enums, signals, state, type aliases, and top-level locals
+- keyword and project-symbol completions
+- enum member completions and typed-object member completions when the current file provides enough annotation information
+- hover for top-level declarations and resolved `require(...)` strings
+- go-to-definition for current-file top-level declarations and alias-resolved `require(...)` targets, including index-file resolution
+- rename for current-file declaration names and project-wide `require(...)` specifier strings
+- quick fixes for:
+  - converting `const` declarations to `local`
+  - adding fallback branches for non-exhaustive `switch`
+  - adding fallback branches for non-exhaustive `match`
 
 ### Current LSP limits
 
-- no completions yet
-- no hover yet
-- no go-to-definition yet
-- no rename yet
-- no code actions yet
+- completions are still syntax- and annotation-driven rather than full semantic inference
+- rename is intentionally conservative and does not yet do symbol-accurate cross-file refactors for arbitrary locals
+- code actions are focused on a small set of high-confidence fixes
+- hover and definition do not yet trace arbitrary exported values across module return tables
 
 ## VS Code Extension
 
@@ -79,7 +87,7 @@ A VS Code client lives under `vscode/xluau-vscode`.
 - `.xl` language registration
 - syntax highlighting
 - bracket and comment configuration
-- diagnostics, formatting, and symbols through `xluau-lsp`
+- diagnostics, formatting, symbols, completions, hover, definition, rename, and quick fixes through `xluau-lsp`
 - a `xluau.restartServer` command
 
 ### Local development
@@ -165,8 +173,7 @@ require(resolveModule("shared/math"))
 
 The remaining phase 9 work is mostly editor depth:
 
-- semantic completions
-- hover and definition navigation
-- cross-file rename
-- code actions
+- deeper semantic completions and richer type-driven hover
+- broader cross-file rename and symbol navigation
+- more automated code actions
 - richer VS Code packaging

@@ -65,6 +65,11 @@ These features are implemented and tested in the current Rust compiler:
 - `xluau-lsp` diagnostics
 - `xluau-lsp` document formatting
 - `xluau-lsp` document symbols
+- `xluau-lsp` completions
+- `xluau-lsp` hover
+- `xluau-lsp` go-to-definition
+- `xluau-lsp` rename
+- `xluau-lsp` code actions
 - `xluau-vscode` syntax highlighting and LSP client wiring
 
 ## Designed but Not Yet Implemented
@@ -72,11 +77,10 @@ These features are implemented and tested in the current Rust compiler:
 These are part of the language design and are documented here so people can learn the intended shape of XLuau, but they are not fully implemented in the current compiler yet:
 
 - Advanced LSP/editor features described in the spec:
-  - completions
-  - hover
-  - go to definition
-  - rename
-  - code actions
+  - deeper semantic completions
+  - project-wide symbol-accurate rename for arbitrary declarations
+  - richer hover/type inference across module boundaries
+  - broader code actions
 - Full VS Code packaging details from the spec:
   - bundled `xluau-lsp`
   - file icons
