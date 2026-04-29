@@ -971,13 +971,14 @@ fn find_declaration<'a>(index: &'a DocumentIndex, name: &str) -> Option<&'a Decl
 }
 
 fn decl_to_symbol(decl: &Declaration) -> Value {
-    let selection_range = range_from_span(decl.name_span, decl.name.len());
     json!({
         "name": decl.name,
         "kind": decl.kind,
-        "detail": decl.detail,
-        "range": selection_range.clone(),
-        "selectionRange": selection_range
+        "containerName": Value::Null,
+        "location": {
+            "uri": path_to_uri(&decl.path).unwrap_or_default(),
+            "range": range_from_span(decl.name_span, decl.name.len())
+        }
     })
 }
 
