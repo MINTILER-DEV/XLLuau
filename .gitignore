@@ -9,6 +9,7 @@
 **/xluau_packages/
 /XLpkg/target
 /XLpkg
+/xluau-json
 
 .vscode
 
