@@ -125,7 +125,7 @@ impl Compiler {
         Ok(artifacts)
     }
 
-    fn collect_project_files(&self) -> Result<Vec<PathBuf>> {
+    pub fn collect_project_files(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         for pattern in &self.config.include {
             let absolute = self.root.join(pattern);

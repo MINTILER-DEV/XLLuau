@@ -94,6 +94,14 @@ impl ModuleResolver {
         Ok(dependencies)
     }
 
+    pub fn resolve_require_path(
+        &self,
+        current_path: &Path,
+        specifier: &str,
+    ) -> Result<Option<ResolvedModule>> {
+        self.resolve_static_require(current_path, specifier)
+    }
+
     fn find_require_calls(&self, source: &str) -> Result<Vec<RequireCall>> {
         let tokens = Lexer::new(source).tokenize()?;
         let mut calls = Vec::new();
