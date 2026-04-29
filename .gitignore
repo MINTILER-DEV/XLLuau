@@ -5,3 +5,5 @@
 /target
 /out
 **/out/
+
+node_modules
