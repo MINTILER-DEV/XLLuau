@@ -199,7 +199,7 @@ cargo run -- bundle --no-minify
 
 ## `publish`
 
-Validate a package repo and optionally update the local `XLpkg/index.json` scaffold.
+Validate a package repo and optionally update the sibling `XLpkg` registry repo's `index.json`.
 
 ```bash
 cargo run -- publish --dry-run
@@ -226,4 +226,4 @@ cargo run -- publish
 - `run` uses `--runtime`, then `XLUAU_RUNTIME`, then `luau`
 - `install` supports registry names, `gh:` GitHub sources, and local `file:` sources
 - `bundle` writes the package bundle configured by `bundleFile`
-- `publish --dry-run` validates `xlpkg.json` plus the package entry point without changing the registry scaffold
+- `publish --dry-run` validates `xlpkg.json` plus the package entry point without changing the `XLpkg` registry repo

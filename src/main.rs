@@ -220,7 +220,7 @@ fn run_publish(args: PublishArgs, cwd: &Path) -> Result<(), Box<dyn std::error::
     println!("public fields: {}", validation.public_fields.join(", "));
     if !args.dry_run {
         manager.publish_to_local_registry()?;
-        println!("updated local XLpkg registry scaffold");
+        println!("updated XLpkg registry repo index");
     }
     Ok(())
 }

@@ -65,6 +65,7 @@ The repository now includes an `xlpkg`-style package workflow through the main `
 - exact pins are written to `xluau.lock`
 - `packages.luau` is regenerated from the installed package set
 - `require "@name"` resolves through the generated package bundle when `packages` is configured
+- `publish` updates the sibling `XLpkg` repo's `index.json` when that registry repo is checked out next to `XLLuau`
 - local `file:` package sources are fully covered by the repository test suite
 
 ## Language Server

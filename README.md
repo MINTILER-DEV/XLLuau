@@ -34,6 +34,6 @@ Implemented today:
 - `fmt` and `run` CLI commands
 - `xlpkg` package install/bundle workflow
 - Baseline LSP diagnostics, formatting, and symbols
-- VS Code language support scaffold
+- VS Code language support
 
 Planned features are also documented, and the docs clearly label what is fully implemented today versus what is still roadmap work.
