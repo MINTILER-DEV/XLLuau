@@ -21,6 +21,7 @@ pub struct ResolvedModule {
     pub source_path: PathBuf,
     pub logical_path: PathBuf,
     pub emitted_require: String,
+    pub is_external: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +57,11 @@ impl ModuleResolver {
                 continue;
             };
 
+            if resolved.is_external {
+                rewritten.replace_range(call.call_start..call.call_end, &resolved.emitted_require);
+                continue;
+            }
+
             match self.config.target.as_str() {
                 "filesystem" => {
                     let replacement =
@@ -85,6 +91,9 @@ impl ModuleResolver {
         let mut dependencies = Vec::new();
         for call in self.find_require_calls(source)? {
             if let Some(resolved) = self.resolve_static_require(current_path, &call.specifier)? {
+                if resolved.is_external {
+                    continue;
+                }
                 dependencies.push(RequireDependency {
                     specifier: call.specifier,
                     resolved,
@@ -167,6 +176,32 @@ impl ModuleResolver {
         current_path: &Path,
         specifier: &str,
     ) -> Result<Option<ResolvedModule>> {
+        if let Some(package_alias) = self.resolve_package_alias(specifier)? {
+            return Ok(Some(ResolvedModule {
+                source_path: self.root.join(&self.config.bundle_file),
+                logical_path: PathBuf::from(&self.config.bundle_file),
+                emitted_require: format!(
+                    "require({}).{}",
+                    quote_string(&self.config.bundle_path),
+                    sanitize_identifier(&package_alias)
+                ),
+                is_external: true,
+            }));
+        }
+
+        if specifier.starts_with('.') {
+            let Some(source_path) = self.try_resolve_relative_source_path(current_path, specifier)? else {
+                return Ok(None);
+            };
+            let logical_path = self.logical_module_path(&source_path)?;
+            return Ok(Some(ResolvedModule {
+                source_path,
+                logical_path,
+                emitted_require: specifier.to_string(),
+                is_external: false,
+            }));
+        }
+
         let Some(base_candidate) = self.resolve_specifier_base(current_path, specifier)? else {
             return Ok(None);
         };
@@ -178,19 +213,44 @@ impl ModuleResolver {
             source_path,
             logical_path,
             emitted_require,
+            is_external: false,
         }))
     }
 
     fn resolve_specifier_base(
         &self,
-        _current_path: &Path,
+        current_path: &Path,
         specifier: &str,
     ) -> Result<Option<PathBuf>> {
+        if specifier.starts_with('.') {
+            return self.try_resolve_relative_source_path(current_path, specifier);
+        }
         if specifier.starts_with('@') {
             return self.resolve_alias_base(specifier).map(Some);
         }
 
         Ok(None)
+    }
+
+    fn resolve_package_alias(&self, specifier: &str) -> Result<Option<String>> {
+        let Some(alias) = specifier.strip_prefix('@') else {
+            return Ok(None);
+        };
+        if alias.contains('/') {
+            return Ok(None);
+        }
+        if self.config.paths.contains_key(&format!("@{alias}"))
+            || self.config.paths.contains_key(&format!("@{alias}/*"))
+        {
+            return Err(CompilerError::Other(format!(
+                "package alias `@{alias}` conflicts with a path alias"
+            )));
+        }
+        Ok(self
+            .config
+            .packages
+            .contains_key(alias)
+            .then(|| alias.to_string()))
     }
 
     fn resolve_alias_base(&self, specifier: &str) -> Result<PathBuf> {
@@ -243,6 +303,23 @@ impl ModuleResolver {
             .or(wildcard_match)
             .map(|(_, path)| path)
             .ok_or_else(|| CompilerError::Other(format!("unknown require alias `{specifier}`")))
+    }
+
+    fn try_resolve_relative_source_path(
+        &self,
+        current_path: &Path,
+        specifier: &str,
+    ) -> Result<Option<PathBuf>> {
+        let base = current_path.parent().unwrap_or(&self.root).join(specifier);
+        match self.resolve_source_path(&base) {
+            Ok(path) => Ok(Some(path)),
+            Err(CompilerError::Other(message))
+                if message.contains("unable to resolve require target") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn resolve_source_path(&self, candidate: &Path) -> Result<PathBuf> {
@@ -476,6 +553,18 @@ fn decode_string_literal(text: &str) -> Result<String> {
 fn quote_string(text: &str) -> String {
     let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+fn sanitize_identifier(text: &str) -> String {
+    let mut output = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            output.push(ch);
+        } else {
+            output.push('_');
+        }
+    }
+    output
 }
 
 fn path_to_luau(path: &Path) -> String {

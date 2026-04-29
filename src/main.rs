@@ -9,7 +9,12 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
-use xluau::{compiler::Compiler, formatter::format_source, source_map::remap_trace};
+use xluau::{
+    compiler::Compiler,
+    formatter::format_source,
+    package_manager::{BundleOptions, PackageManager},
+    source_map::remap_trace,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "xluau")]
@@ -25,6 +30,12 @@ enum Command {
     Check(CheckArgs),
     Fmt(FmtArgs),
     Run(RunArgs),
+    Install(PackageArgs),
+    Remove(PackageArgs),
+    Update(PackageArgs),
+    List(ProjectPathArgs),
+    Bundle(BundleArgs),
+    Publish(PublishArgs),
     Remap { stacktrace: PathBuf },
 }
 
@@ -56,6 +67,34 @@ struct RunArgs {
     runtime: Option<String>,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PackageArgs {
+    #[arg()]
+    packages: Vec<String>,
+    #[arg(long)]
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ProjectPathArgs {
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct BundleArgs {
+    path: Option<PathBuf>,
+    #[arg(long)]
+    no_minify: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PublishArgs {
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,10 +130,97 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Check(args) => run_operation(Operation::Check, args.path, args.watch, &cwd)?,
         Command::Fmt(args) => run_format(args.path, args.check, &cwd)?,
         Command::Run(args) => run_file(args, &cwd)?,
+        Command::Install(args) => run_install(args, &cwd)?,
+        Command::Remove(args) => run_remove(args, &cwd)?,
+        Command::Update(args) => run_update(args, &cwd)?,
+        Command::List(args) => run_list(args, &cwd)?,
+        Command::Bundle(args) => run_bundle(args, &cwd)?,
+        Command::Publish(args) => run_publish(args, &cwd)?,
         Command::Remap { stacktrace } => {
             let trace = fs::read_to_string(&stacktrace)?;
             println!("{}", remap_trace(&trace, &cwd));
         }
+    }
+    Ok(())
+}
+
+fn run_install(args: PackageArgs, cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = resolve_project_root(args.path, cwd)?;
+    let mut manager = PackageManager::discover(&root)?;
+    let installed = if args.packages.is_empty() {
+        manager.install_all()?
+    } else {
+        manager.install_requests(&args.packages)?
+    };
+    for package in installed {
+        println!(
+            "installed {} {} ({})",
+            package.package_id, package.version, package.repo
+        );
+    }
+    Ok(())
+}
+
+fn run_remove(args: PackageArgs, cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if args.packages.is_empty() {
+        return Err(io::Error::other("remove expects one or more package aliases").into());
+    }
+    let root = resolve_project_root(args.path, cwd)?;
+    let mut manager = PackageManager::discover(&root)?;
+    manager.remove_aliases(&args.packages)?;
+    for alias in args.packages {
+        println!("removed {alias}");
+    }
+    Ok(())
+}
+
+fn run_update(args: PackageArgs, cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = resolve_project_root(args.path, cwd)?;
+    let mut manager = PackageManager::discover(&root)?;
+    let updated = manager.update_requests(&args.packages)?;
+    for package in updated {
+        println!(
+            "updated {} {} ({})",
+            package.package_id, package.version, package.repo
+        );
+    }
+    Ok(())
+}
+
+fn run_list(args: ProjectPathArgs, cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = resolve_project_root(args.path, cwd)?;
+    let manager = PackageManager::discover(&root)?;
+    for package in manager.list()? {
+        println!("{} {} {}", package.package_id, package.version, package.repo);
+    }
+    Ok(())
+}
+
+fn run_bundle(args: BundleArgs, cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = resolve_project_root(args.path, cwd)?;
+    let manager = PackageManager::discover(&root)?;
+    let bundle = manager.bundle(BundleOptions {
+        minify: !args.no_minify,
+    })?;
+    println!("bundled {}", bundle.display());
+    Ok(())
+}
+
+fn run_publish(args: PublishArgs, cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = resolve_project_root(args.path, cwd)?;
+    let manager = PackageManager::discover(&root)?;
+    let validation = manager.validate_publish()?;
+    println!(
+        "validated {} {}",
+        validation.manifest.name, validation.manifest.version
+    );
+    if !validation.exported_types.is_empty() {
+        println!("exported types: {}", validation.exported_types.join(", "));
+    }
+    println!("public fields: {}", validation.public_fields.join(", "));
+    if !args.dry_run {
+        manager.publish_to_local_registry()?;
+        println!("updated local XLpkg registry scaffold");
     }
     Ok(())
 }
@@ -402,6 +528,17 @@ fn resolve_run_entry(path: &Path, cwd: &Path) -> Result<PathBuf, Box<dyn std::er
         root.display()
     ))
     .into())
+}
+
+fn resolve_project_root(
+    path: Option<PathBuf>,
+    cwd: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let target = resolve_invocation_target(path, cwd)?;
+    match target {
+        InvocationTarget::ProjectRoot(root) => Ok(root),
+        InvocationTarget::SingleFile { compiler_root, .. } => Ok(compiler_root),
+    }
 }
 
 fn snapshot_watch_state(

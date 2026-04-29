@@ -6,8 +6,12 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.5.38", features = ["derive"] }
 glob = "0.3.2"
+hex = "0.4.3"
 luau-parser = "0.2.68"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+sha2 = "0.10.9"
 thiserror = "2.0.17"
+time = { version = "0.3.44", features = ["formatting"] }
 url = "2.5.7"

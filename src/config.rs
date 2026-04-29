@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
@@ -7,7 +7,7 @@ use std::{
 
 use crate::compiler::{CompilerError, Result};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XluauConfig {
     #[serde(default = "default_version")]
@@ -28,6 +28,8 @@ pub struct XluauConfig {
     pub base_dir: PathBuf,
     #[serde(default)]
     pub paths: BTreeMap<String, String>,
+    #[serde(default)]
+    pub packages: BTreeMap<String, String>,
     #[serde(default = "default_extensions")]
     pub extensions: Vec<String>,
     #[serde(default = "default_index_files")]
@@ -44,6 +46,18 @@ pub struct XluauConfig {
     pub no_unchecked_optional: bool,
     #[serde(default = "default_task_adapter")]
     pub task_adapter: String,
+    #[serde(default = "default_package_dir")]
+    pub package_dir: PathBuf,
+    #[serde(default = "default_bundle_file")]
+    pub bundle_file: PathBuf,
+    #[serde(default = "default_bundle_path")]
+    pub bundle_path: String,
+    #[serde(default = "default_registry")]
+    pub registry: String,
+    #[serde(default = "default_true")]
+    pub minify: bool,
+    #[serde(default = "default_true")]
+    pub deduplicate_deps: bool,
 }
 
 impl Default for XluauConfig {
@@ -58,6 +72,7 @@ impl Default for XluauConfig {
             luau_target: default_luau_target(),
             base_dir: default_base_dir(),
             paths: BTreeMap::new(),
+            packages: BTreeMap::new(),
             extensions: default_extensions(),
             index_files: default_index_files(),
             source_maps: default_true(),
@@ -66,6 +81,12 @@ impl Default for XluauConfig {
             no_implicit_any: default_true(),
             no_unchecked_optional: default_true(),
             task_adapter: default_task_adapter(),
+            package_dir: default_package_dir(),
+            bundle_file: default_bundle_file(),
+            bundle_path: default_bundle_path(),
+            registry: default_registry(),
+            minify: default_true(),
+            deduplicate_deps: default_true(),
         }
     }
 }
@@ -127,4 +148,20 @@ fn default_true() -> bool {
 
 fn default_task_adapter() -> String {
     "coroutine".to_string()
+}
+
+fn default_package_dir() -> PathBuf {
+    PathBuf::from("xluau_packages")
+}
+
+fn default_bundle_file() -> PathBuf {
+    PathBuf::from("packages.luau")
+}
+
+fn default_bundle_path() -> String {
+    "./packages.luau".to_string()
+}
+
+fn default_registry() -> String {
+    "https://raw.githubusercontent.com/XLuau/XLpkg/main/index.json".to_string()
 }

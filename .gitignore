@@ -5,6 +5,9 @@
 /target
 /out
 **/out/
+/xluau_packages
+**/xluau_packages/
+/XLpkg/target
 
 .vscode
 

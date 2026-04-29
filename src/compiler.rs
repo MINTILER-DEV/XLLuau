@@ -13,6 +13,7 @@ use crate::{
     formatter::format_luau,
     lexer::{Keyword, Lexer, Symbol, Token},
     module::{ModuleResolver, detect_circular_dependencies},
+    package_manager::ensure_bundle_for_project,
     parser::Parser,
     source_map::{SourceMap, finalize_output},
 };
@@ -83,6 +84,7 @@ impl Compiler {
     }
 
     pub fn build_file(&self, path: &Path) -> Result<BuildArtifact> {
+        ensure_bundle_for_project(&self.root, &self.config)?;
         let input = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -104,6 +106,7 @@ impl Compiler {
     }
 
     pub fn build_project(&self) -> Result<Vec<BuildArtifact>> {
+        ensure_bundle_for_project(&self.root, &self.config)?;
         let files = self.collect_project_files()?;
         self.check_cycles(&files)?;
 
@@ -347,6 +350,7 @@ mod tests {
     };
 
     use super::Compiler;
+    use crate::package_manager::PackageManager;
 
     fn compiler() -> Compiler {
         Compiler::discover(".").expect("compiler")
@@ -368,6 +372,62 @@ mod tests {
             fs::create_dir_all(parent).expect("parent");
         }
         fs::write(path, contents).expect("write file");
+    }
+
+    #[test]
+    fn resolves_package_requires_through_generated_bundle() {
+        let root = temp_project("package_bundle_require");
+        let package_repo = root.join("http_pkg");
+        write_file(
+            &package_repo,
+            "xlpkg.json",
+            r#"{"name":"http","version":"1.0.0","repo":"local/http","entry":"init.xl"}"#,
+        );
+        write_file(
+            &package_repo,
+            "init.xl",
+            r#"
+local function get(url: string): string
+    return url
+end
+
+return {
+    get = get,
+}
+"#,
+        );
+        write_file(
+            &root,
+            "xluau.config.json",
+            &format!(
+                r#"{{
+  "include": ["src/**/*.xl"],
+  "registry": "{}",
+  "packages": {{
+    "http": "file:{}"
+  }}
+}}"#,
+                root.join("index.json").display().to_string().replace('\\', "\\\\"),
+                package_repo.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+        write_file(&root, "index.json", r#"{"version":1,"packages":{}}"#);
+        write_file(
+            &root,
+            "src/main.xl",
+            r#"
+local http = require "@http"
+return http.get("https://example.com")
+"#,
+        );
+        let mut manager = PackageManager::discover(&root).unwrap();
+        manager
+            .install_requests(&[format!("file:{}", package_repo.display())])
+            .unwrap();
+        let compiler = Compiler::discover(&root).unwrap();
+        let artifact = compiler.build_file(&root.join("src/main.xl")).unwrap();
+        assert!(artifact.luau.contains(r#"require("./packages.luau").http"#));
+        assert!(root.join("packages.luau").is_file());
     }
 
     #[test]

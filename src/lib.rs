@@ -5,6 +5,7 @@ pub mod emitter;
 pub mod formatter;
 pub mod lexer;
 pub mod module;
+pub mod package_manager;
 pub mod parser;
 pub mod source_map;
 
