@@ -6,4 +6,6 @@
 /out
 **/out/
 
+.vscode
+
 node_modules
