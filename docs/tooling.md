@@ -46,6 +46,27 @@ cargo run -- run src/main.xl
 
 This builds the selected entry, writes the emitted `.luau`, and launches a Luau runtime command.
 
+## Package Manager
+
+The repository now includes an `xlpkg`-style package workflow through the main `xluau` CLI.
+
+### Current package commands
+
+- `cargo run -- install ...`
+- `cargo run -- remove ...`
+- `cargo run -- update ...`
+- `cargo run -- list`
+- `cargo run -- bundle`
+- `cargo run -- publish --dry-run`
+
+### Current package behavior
+
+- installed package source is stored in `xluau_packages/`
+- exact pins are written to `xluau.lock`
+- `packages.luau` is regenerated from the installed package set
+- `require "@name"` resolves through the generated package bundle when `packages` is configured
+- local `file:` package sources are fully covered by the repository test suite
+
 ## Language Server
 
 The repository now ships a baseline language server as the `xluau-lsp` binary.

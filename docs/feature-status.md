@@ -62,6 +62,10 @@ These features are implemented and tested in the current Rust compiler:
 - `build --watch` and `check --watch`
 - `xluau fmt`
 - `xluau run`
+- `xluau install`, `remove`, `update`, `list`, `bundle`, and `publish --dry-run`
+- `packages.luau` bundle generation
+- `xluau.lock` generation and local package installs
+- `require "@package"` bundle resolution
 - `xluau-lsp` diagnostics
 - `xluau-lsp` document formatting
 - `xluau-lsp` document symbols
@@ -86,6 +90,9 @@ These are part of the language design and are documented here so people can lear
   - file icons
   - task definitions
   - sourcemap-aware editor UX
+- Full zero-infrastructure registry workflow still has some practical gaps:
+  - GitHub/jsDelivr fetches are implemented conservatively and local/local-file flows are the best-covered test path
+  - package type-surface inference is implemented, but still simpler than the full idealized spec
 
 ## How to Read the Guides
 

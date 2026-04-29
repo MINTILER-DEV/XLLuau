@@ -32,6 +32,7 @@ Implemented today:
 - Table comprehensions
 - `do`-expressions
 - `fmt` and `run` CLI commands
+- `xlpkg` package install/bundle workflow
 - Baseline LSP diagnostics, formatting, and symbols
 - VS Code language support scaffold
 

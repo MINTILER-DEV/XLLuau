@@ -9,6 +9,12 @@ xluau build [path] [--watch]
 xluau check [path] [--watch]
 xluau fmt [path] [--check]
 xluau run <path> [--runtime <cmd>] [args...]
+xluau install [package...]
+xluau remove <alias...>
+xluau update [package...]
+xluau list [path]
+xluau bundle [path] [--no-minify]
+xluau publish [--dry-run]
 xluau remap <stacktrace>
 ```
 
@@ -144,6 +150,62 @@ cargo run -- run src/main.xl --runtime luau
 cargo run -- run src/main.xl -- --flag value
 ```
 
+## `install`
+
+Install packages into `xluau_packages/`, update `xluau.lock`, and regenerate `packages.luau`.
+
+```bash
+cargo run -- install http
+cargo run -- install http json
+cargo run -- install gh:someuser/xlpackage@1.2.0
+cargo run -- install
+```
+
+## `remove`
+
+Remove one or more package aliases from config and lock state.
+
+```bash
+cargo run -- remove http
+cargo run -- remove http json
+```
+
+## `update`
+
+Refresh packages and regenerate the bundle.
+
+```bash
+cargo run -- update
+cargo run -- update http
+cargo run -- update gh:someuser/xlpackage@2.0.0
+```
+
+## `list`
+
+List packages currently recorded in `xluau.lock`.
+
+```bash
+cargo run -- list
+```
+
+## `bundle`
+
+Regenerate `packages.luau` from the installed package set.
+
+```bash
+cargo run -- bundle
+cargo run -- bundle --no-minify
+```
+
+## `publish`
+
+Validate a package repo and optionally update the local `XLpkg/index.json` scaffold.
+
+```bash
+cargo run -- publish --dry-run
+cargo run -- publish
+```
+
 ## Current Behavior
 
 - If `path` is omitted, uses the current working directory as the project root
@@ -162,3 +224,6 @@ cargo run -- run src/main.xl -- --flag value
 - `run` resolves entry files from a source file, a project directory, or a config path
 - `run` looks for `src/main.xl`, `src/main.luau`, `main.xl`, then `main.luau` when given a project path
 - `run` uses `--runtime`, then `XLUAU_RUNTIME`, then `luau`
+- `install` supports registry names, `gh:` GitHub sources, and local `file:` sources
+- `bundle` writes the package bundle configured by `bundleFile`
+- `publish --dry-run` validates `xlpkg.json` plus the package entry point without changing the registry scaffold
