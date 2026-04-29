@@ -624,7 +624,6 @@ struct Declaration {
     hover: String,
     path: PathBuf,
     name_span: Span,
-    full_span: Span,
     keyword_span: Option<Span>,
     is_const: bool,
 }
@@ -730,7 +729,6 @@ fn build_document_index(path: PathBuf, source: String) -> DocumentIndex {
                             hover: signature,
                             path: path.clone(),
                             name_span,
-                            full_span: function.span,
                             keyword_span: first_keyword_span(
                                 &tokens,
                                 function.span.start,
@@ -768,7 +766,6 @@ fn build_document_index(path: PathBuf, source: String) -> DocumentIndex {
                             hover: render_object_hover(object),
                             path: path.clone(),
                             name_span,
-                            full_span: object.span,
                             keyword_span: first_keyword_span(
                                 &tokens,
                                 object.span.start,
@@ -800,7 +797,6 @@ fn build_document_index(path: PathBuf, source: String) -> DocumentIndex {
                             hover: render_enum_hover(decl),
                             path: path.clone(),
                             name_span,
-                            full_span: decl.span,
                             keyword_span: first_keyword_span(
                                 &tokens,
                                 decl.span.start,
@@ -823,7 +819,6 @@ fn build_document_index(path: PathBuf, source: String) -> DocumentIndex {
                             hover: signature,
                             path: path.clone(),
                             name_span,
-                            full_span: signal.span,
                             keyword_span: first_keyword_span(
                                 &tokens,
                                 signal.span.start,
@@ -850,7 +845,6 @@ fn build_document_index(path: PathBuf, source: String) -> DocumentIndex {
                             hover: render_state_signature(name, annotation.as_deref()),
                             path: path.clone(),
                             name_span,
-                            full_span: state.span,
                             keyword_span: first_keyword_span(
                                 &tokens,
                                 state.span.start,
@@ -873,7 +867,6 @@ fn build_document_index(path: PathBuf, source: String) -> DocumentIndex {
                             hover: raw.clone(),
                             path: path.clone(),
                             name_span,
-                            full_span: *span,
                             keyword_span: first_keyword_span(
                                 &tokens,
                                 span.start,
@@ -905,7 +898,6 @@ fn build_document_index(path: PathBuf, source: String) -> DocumentIndex {
                                 hover: render_local_signature(name, type_annotation.as_deref(), local.is_const),
                                 path: path.clone(),
                                 name_span,
-                                full_span: local.span,
                                 keyword_span: Some(local.span),
                                 is_const: local.is_const,
                             });
@@ -979,12 +971,13 @@ fn find_declaration<'a>(index: &'a DocumentIndex, name: &str) -> Option<&'a Decl
 }
 
 fn decl_to_symbol(decl: &Declaration) -> Value {
+    let selection_range = range_from_span(decl.name_span, decl.name.len());
     json!({
         "name": decl.name,
         "kind": decl.kind,
         "detail": decl.detail,
-        "range": range_from_span(decl.full_span, decl.name.len()),
-        "selectionRange": range_from_span(decl.name_span, decl.name.len())
+        "range": selection_range.clone(),
+        "selectionRange": selection_range
     })
 }
 
