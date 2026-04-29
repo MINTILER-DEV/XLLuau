@@ -32,7 +32,8 @@ npm install
 
 By default the extension tries:
 
-- `<workspace>/target/debug/xluau-lsp(.exe)`
+- the nearest ancestor workspace folder that contains `target/debug/xluau-lsp(.exe)`
+- the nearest ancestor workspace folder that contains `target/release/xluau-lsp(.exe)`
 - `xluau-lsp` on your `PATH`
 
 You can override that with the `xluau.server.path` setting.
