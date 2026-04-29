@@ -1,0 +1,9 @@
+{
+  "include": [
+    "src/**/*.xl"
+  ],
+  "outDir": "out",
+  "packages": {
+    "json": "file:REPLACED_BY_TEST"
+  }
+}

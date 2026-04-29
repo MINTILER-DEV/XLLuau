@@ -28,3 +28,9 @@ Phase 3 module-system fixtures live under `tests/module_projects/`.
 Those fixtures include their own `xluau.config.json` files plus small source trees
 so alias resolution, index-file lookup, target adapters, and cycle detection can
 be exercised as project-level behavior rather than single-file lowering only.
+
+Package-manager fixtures live under `tests/package_projects/`.
+
+Those fixtures are copied into a temporary project root during the test run so the
+test can inject absolute `file:` package paths, install packages, generate
+`packages.luau`, and then verify the final emitted Luau against `expected.luau`.

@@ -1,0 +1,15 @@
+local json = require("./packages.luau").json
+
+local payload = json.decode('{"name":"Pacman","lives":3,"items":["pellet","fruit"],"active":true}')
+local summary = {
+    count = #payload.items,
+    first = payload.items[1],
+    encoded = json.encode(payload, {
+        sortKeys = true,
+    }),
+}
+
+return {
+    payload = payload,
+    summary = summary,
+}
