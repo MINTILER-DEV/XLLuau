@@ -61,9 +61,10 @@ cargo build --bin xluau-lsp
 - parse and validation diagnostics for open `.xl` files
 - document formatting through the same formatter used by `xluau fmt`
 - top-level document symbols for functions, objects, enums, signals, state, type aliases, and top-level locals
-- keyword and project-symbol completions
-- enum member completions and typed-object member completions when the current file provides enough annotation information
-- hover for top-level declarations and resolved `require(...)` strings
+- keyword, builtin global, and builtin type completions
+- enum member completions, string member completions, and typed-object member completions when the current file provides enough annotation information
+- hover for top-level declarations, builtin globals/types, string members, and resolved `require(...)` strings
+- simple local type inference for literals and `#value` expressions such as strings and array-like tables
 - go-to-definition for current-file top-level declarations and alias-resolved `require(...)` targets, including index-file resolution
 - rename for current-file declaration names and project-wide `require(...)` specifier strings
 - quick fixes for:

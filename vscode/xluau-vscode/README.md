@@ -41,5 +41,8 @@ You can override that with the `xluau.server.path` setting.
 ## Current Behavior Notes
 
 - definitions for `require("@alias/...")` jump to the resolved source file, including index files like `init.xl`
+- builtin globals, builtin types, and common string members like `sub`, `find`, and `upper` show up in completions
+- string literals and string locals support member completion for forms like `("text"):sub(...)` and `value.sub(...)`
+- simple local inference treats `#string` and `#table` results as `number` in editor hints
 - rename currently supports current-file declaration names and project-wide `require(...)` specifier strings
 - quick fixes currently cover `const` to `local`, plus fallback branches for non-exhaustive `switch` and `match`
