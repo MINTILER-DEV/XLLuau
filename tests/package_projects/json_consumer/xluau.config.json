@@ -3,7 +3,8 @@
     "src/**/*.xl"
   ],
   "outDir": "out",
+  "registry": "../../../XLpkg/index.json",
   "packages": {
-    "json": "file:REPLACED_BY_TEST"
+    "json": "json"
   }
 }
