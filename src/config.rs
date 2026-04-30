@@ -163,5 +163,5 @@ fn default_bundle_path() -> String {
 }
 
 fn default_registry() -> String {
-    "https://raw.githubusercontent.com/XLuau/XLpkg/main/index.json".to_string()
+    "https://raw.githubusercontent.com/XLuau/XLpkg/master/index.json".to_string()
 }

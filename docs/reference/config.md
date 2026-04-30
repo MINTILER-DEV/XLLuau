@@ -30,7 +30,7 @@ This page documents the configuration shape currently described by the project a
   "packageDir": "xluau_packages",
   "bundleFile": "packages.luau",
   "bundlePath": "./packages.luau",
-  "registry": "https://raw.githubusercontent.com/XLuau/XLpkg/main/index.json",
+  "registry": "https://raw.githubusercontent.com/XLuau/XLpkg/master/index.json",
   "minify": true,
   "deduplicateDeps": true
 }
